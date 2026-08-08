@@ -16,9 +16,14 @@ copypatch = { path = "copypatch", version = "0.2.0-rc.4" }
 facet = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
 facet-core = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
 object = "0.39"
-snark = { git = "https://github.com/bearcove/snark", rev = "45466295bf1cc811edc80e9f024372527e9b65ca" }
-snark-dsl = { git = "https://github.com/bearcove/snark", rev = "45466295bf1cc811edc80e9f024372527e9b65ca" }
+snark = { git = "https://github.com/bearcove/snark", rev = "27c86b89c99b64bc32c905f547ef271c9e0f114b" }
+snark-dsl = { git = "https://github.com/bearcove/snark", rev = "27c86b89c99b64bc32c905f547ef271c9e0f114b" }
 weavy = { path = "weavy", version = "0.2.2" }
+
+[patch."https://github.com/bearcove/weavy"]
+copypatch = { path = "copypatch" }
+taxon = { path = "taxon" }
+weavy = { path = "weavy" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(facet_no_doc)", "cfg(kani)"] }
