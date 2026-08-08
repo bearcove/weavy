@@ -16,8 +16,8 @@ copypatch = { path = "copypatch", version = "0.2.0-rc.4" }
 facet = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
 facet-core = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
 object = "0.39"
-snark = { git = "https://github.com/bearcove/snark", rev = "0000000000000000000000000000000000000000" }
-snark-dsl = { git = "https://github.com/bearcove/snark", rev = "0000000000000000000000000000000000000000" }
+snark = { git = "https://github.com/bearcove/snark", rev = "45466295bf1cc811edc80e9f024372527e9b65ca" }
+snark-dsl = { git = "https://github.com/bearcove/snark", rev = "45466295bf1cc811edc80e9f024372527e9b65ca" }
 weavy = { path = "weavy", version = "0.2.2" }
 
 [workspace.lints.rust]
