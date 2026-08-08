@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["copypatch", "taxon", "weavy", "fable"]
-default-members = ["copypatch", "taxon", "weavy"]
+members = ["copypatch", "taxon", "weavy"]
+exclude = ["fable"]
 
 [workspace.package]
 edition = "2024"
@@ -13,8 +13,8 @@ homepage = "https://github.com/bearcove/weavy"
 [workspace.dependencies]
 blake3 = { version = "1", default-features = false }
 copypatch = { path = "copypatch", version = "0.2.0-rc.4" }
-facet = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
-facet-core = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
+facet = { git = "https://github.com/facet-rs/facet", rev = "dc57e24e381f0c61b4acfa242c368656a84348d4" }
+facet-core = { git = "https://github.com/facet-rs/facet", rev = "dc57e24e381f0c61b4acfa242c368656a84348d4" }
 object = "0.39"
 snark = { git = "https://github.com/bearcove/snark", rev = "27c86b89c99b64bc32c905f547ef271c9e0f114b" }
 snark-dsl = { git = "https://github.com/bearcove/snark", rev = "27c86b89c99b64bc32c905f547ef271c9e0f114b" }
@@ -24,6 +24,12 @@ weavy = { path = "weavy", version = "0.2.2" }
 copypatch = { path = "copypatch" }
 taxon = { path = "taxon" }
 weavy = { path = "weavy" }
+
+[patch.crates-io]
+copypatch = { path = "copypatch" }
+taxon = { path = "taxon" }
+weavy = { path = "weavy" }
+
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(facet_no_doc)", "cfg(kani)"] }
