@@ -16,8 +16,8 @@ copypatch = { path = "copypatch", version = "0.2.0-rc.4" }
 facet = { git = "https://github.com/facet-rs/facet", rev = "dc57e24e381f0c61b4acfa242c368656a84348d4" }
 facet-core = { git = "https://github.com/facet-rs/facet", rev = "dc57e24e381f0c61b4acfa242c368656a84348d4" }
 object = "0.39"
-snark = { git = "https://github.com/bearcove/snark", rev = "da157a34d268cde4153aa0abbcbfb5caa19cf58a" }
-snark-dsl = { git = "https://github.com/bearcove/snark", rev = "da157a34d268cde4153aa0abbcbfb5caa19cf58a" }
+snark = { git = "https://github.com/bearcove/snark", rev = "5b83968ae06d439c8c9ecce5550803acf723c641" }
+snark-dsl = { git = "https://github.com/bearcove/snark", rev = "5b83968ae06d439c8c9ecce5550803acf723c641" }
 weavy = { path = "weavy", version = "0.2.2" }
 
 [patch."https://github.com/bearcove/weavy"]
