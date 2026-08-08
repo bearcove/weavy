@@ -5,8 +5,7 @@ use snark_dsl::typed_ast::{TypedAstConfig, generate_typed_ast};
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let repo = manifest.parent().unwrap().to_path_buf();
-    let grammar_js = repo.join("playgrounds/snark/src/bundled/fable/grammar.js");
+    let grammar_js = manifest.join("grammar/grammar.js");
     let ann_js = manifest.join("fable_ast.snark.js");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
 
