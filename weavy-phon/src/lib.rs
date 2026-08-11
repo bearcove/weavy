@@ -133,7 +133,7 @@ impl<'a, Intrinsic: weavy::module::IntrinsicContract> BorrowedModule<'a, Intrins
             .map_err(CodecError::Aligned)
     }
 
-    pub fn dense_range(&self, index: usize) -> Result<DenseRange<'_>, CodecError> {
+    pub fn dense_range(&self, index: usize) -> Result<DenseRange<'a>, CodecError> {
         let range = self
             .ranges
             .get(index)
