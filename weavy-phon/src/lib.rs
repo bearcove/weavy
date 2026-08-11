@@ -7,8 +7,8 @@ use phon_schema::{
     Field, Primitive, Schema, SchemaId, SchemaKind, SchemaRef, primitive_id, resolve_ids,
     schema_from_bytes, schema_to_bytes,
 };
-use phon_storage::compact::{self, Registry};
-use phon_storage::{AlignedDocument, AlignedRegistry};
+use phon_storage::compact::Registry;
+use phon_storage::{AlignedDocument, AlignedRegistry, DenseRange, compact};
 use weavy::ir::{AggregateOp, ControlOp, InitOp, MemoryOp, WeavyOp};
 use weavy::mem::{Layout, ScalarSegment};
 use weavy::module::{
@@ -133,6 +133,24 @@ impl<'a, Intrinsic: weavy::module::IntrinsicContract> BorrowedModule<'a, Intrins
             .map_err(CodecError::Aligned)
     }
 
+    pub fn dense_range(&self, index: usize) -> Result<DenseRange<'_>, CodecError> {
+        let range = self
+            .ranges
+            .get(index)
+            .ok_or(CodecError::MissingConstantRange {
+                id: u32::try_from(index).unwrap_or(u32::MAX),
+            })?;
+        if range.report.profile != StorageProfile::DenseAligned {
+            return Err(CodecError::WrongStorageProfile);
+        }
+        DenseRange::parse_stored_layout(
+            range.bytes,
+            range.report.count as usize,
+            range.report.stride,
+        )
+        .map_err(CodecError::Aligned)
+    }
+
     pub fn compact_value(&self, index: usize) -> Result<Value, CodecError> {
         let range = self
             .ranges
@@ -225,7 +243,10 @@ pub fn save<C: IntrinsicCodec>(module: &WeavyModule<C::Intrinsic>) -> Result<Vec
     )?;
     let mut sections = Vec::with_capacity(payloads.len());
     for (name, kind, schema_id, payload, profile, count, stride) in &payloads {
-        let payload_alignment = if *profile == Some(StorageProfile::Aligned) {
+        let payload_alignment = if matches!(
+            profile,
+            Some(StorageProfile::Aligned | StorageProfile::DenseAligned)
+        ) {
             64
         } else {
             8
@@ -252,7 +273,10 @@ pub fn save<C: IntrinsicCodec>(module: &WeavyModule<C::Intrinsic>) -> Result<Vec
     loop {
         let mut next = align_up(HEADER_SIZE + directory.len(), DIRECTORY_ALIGNMENT as usize)?;
         for (section, (_, _, _, payload, profile, _, _)) in sections.iter_mut().zip(&payloads) {
-            let alignment = if *profile == Some(StorageProfile::Aligned) {
+            let alignment = if matches!(
+                profile,
+                Some(StorageProfile::Aligned | StorageProfile::DenseAligned)
+            ) {
                 64
             } else {
                 8
@@ -557,6 +581,7 @@ fn encode_directory(sections: &[SectionReport]) -> Result<Vec<u8>, CodecError> {
                 None => 0u8,
                 Some(StorageProfile::Compact) => 1,
                 Some(StorageProfile::Aligned) => 2,
+                Some(StorageProfile::DenseAligned) => 3,
             }),
         );
         object.insert(VString::new("count"), Value::from(section.count));
@@ -590,6 +615,7 @@ fn decode_directory(bytes: &[u8]) -> Result<Vec<SectionReport>, CodecError> {
                     0 => None,
                     1 => Some(StorageProfile::Compact),
                     2 => Some(StorageProfile::Aligned),
+                    3 => Some(StorageProfile::DenseAligned),
                     _ => return Err(CodecError::MalformedDirectory),
                 },
                 count: object_u32(object, "count")?,
@@ -710,6 +736,10 @@ fn validate_constant_range_sections(
                 if count != section.count as usize {
                     return Err(CodecError::MalformedConstantRange);
                 }
+            }
+            StorageProfile::DenseAligned => {
+                DenseRange::parse_stored_layout(bytes, section.count as usize, section.stride)
+                    .map_err(CodecError::Aligned)?;
             }
             StorageProfile::Compact => {
                 compact::from_bytes(bytes, schema, compact_registry).map_err(CodecError::Phon)?;

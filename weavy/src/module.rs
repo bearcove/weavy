@@ -47,6 +47,7 @@ impl ConstantRangeId {
 pub enum StorageProfile {
     Compact,
     Aligned,
+    DenseAligned,
 }
 
 /// One homogeneous typed constant range.
