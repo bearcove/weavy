@@ -16,7 +16,7 @@ copypatch = { path = "copypatch", version = "0.2.0-rc.4" }
 facet = { git = "https://github.com/facet-rs/facet", rev = "5705fa6c51289bea49f5729c52dc5e23cedce4f8" }
 facet-core = { git = "https://github.com/facet-rs/facet", rev = "5705fa6c51289bea49f5729c52dc5e23cedce4f8" }
 object = "0.39"
-phon-schema = { path = "../phon-weavy-module-phase2/rust/phon-schema" }
+phon-schema = { path = "../phon/rust/phon-schema" }
 weavy = { path = "weavy", version = "0.2.2" }
 
 [patch."https://github.com/bearcove/weavy"]
