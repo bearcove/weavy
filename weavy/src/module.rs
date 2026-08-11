@@ -405,6 +405,21 @@ impl ConstantRangeReference {
             expected_profile,
         }
     }
+
+    #[must_use]
+    pub const fn id(self) -> ConstantRangeId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn expected_schema(self) -> SchemaId {
+        self.expected_schema
+    }
+
+    #[must_use]
+    pub const fn expected_profile(self) -> StorageProfile {
+        self.expected_profile
+    }
 }
 
 /// Admission contract implemented by each durable intrinsic vocabulary.
