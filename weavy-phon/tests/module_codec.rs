@@ -269,3 +269,43 @@ fn borrowed_ranges_reject_bad_schema_bounds_alignment_and_count() {
         Err(CodecError::Aligned(_))
     ));
 }
+
+#[test]
+fn borrowed_dense_range_keeps_fixed_rows_in_module_bytes() {
+    let payload = phon_storage::DenseRangeWriter::encode(
+        8,
+        4,
+        [1u8, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0],
+    )
+    .expect("dense rows");
+    let module = WeavyModule::new(
+        ModuleManifest::new("dense", [DialectRequirement::new("test", 1, 0)], [0]),
+        DenseLowered::new(
+            vec![WeavyOp::Intrinsic(TestIntrinsic {
+                constant: ConstantId::new(0),
+                range: ConstantRangeId::new(0),
+            })],
+            Vec::new(),
+        ),
+        ConstantPool::new(vec![Constant::new(0x42, vec![1])]),
+    )
+    .with_constant_ranges(vec![
+        ConstantRange::new(
+            range_schema().0,
+            1,
+            StorageProfile::DenseAligned,
+            2,
+            8,
+            payload,
+        )
+        .expect("range"),
+    ]);
+    let bytes = save::<TestCodec>(&module).expect("save");
+    let borrowed = load_borrowed::<TestCodec>(&bytes).expect("borrowed load");
+    let range = borrowed.dense_range(0).expect("dense range");
+    assert_eq!(range.row(1).expect("second row"), &[3, 0, 0, 0, 4, 0, 0, 0]);
+    assert_eq!(
+        range.bytes().as_ptr(),
+        borrowed.constant_ranges()[0].bytes().as_ptr()
+    );
+}
