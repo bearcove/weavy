@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["copypatch", "taxon", "weavy"]
+members = ["copypatch", "taxon", "weavy", "weavy-phon"]
 exclude = ["fable"]
 
 [workspace.package]
