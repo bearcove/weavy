@@ -143,12 +143,8 @@ impl<'a, Intrinsic: weavy::module::IntrinsicContract> BorrowedModule<'a, Intrins
         if range.report.profile != StorageProfile::DenseAligned {
             return Err(CodecError::WrongStorageProfile);
         }
-        DenseRange::parse_stored_layout(
-            range.bytes,
-            range.report.count as usize,
-            range.report.stride,
-        )
-        .map_err(CodecError::Aligned)
+        DenseRange::parse(range.bytes, range.report.schema_id, &self.aligned_registry)
+            .map_err(CodecError::Aligned)
     }
 
     pub fn compact_value(&self, index: usize) -> Result<Value, CodecError> {
@@ -183,6 +179,18 @@ pub fn save<C: IntrinsicCodec>(module: &WeavyModule<C::Intrinsic>) -> Result<Vec
     let schemas = encode_schema_bundle(module.constant_ranges());
     let program = encode_program::<C>(module.program())?;
     let constants = encode_constants(module.constants())?;
+    for range in module.constant_ranges() {
+        if range.profile() == StorageProfile::DenseAligned {
+            let registry =
+                AlignedRegistry::try_new(range.schemas().to_vec()).map_err(CodecError::Phon)?;
+            let dense = DenseRange::parse(range.bytes(), range.schema_id(), &registry)
+                .map_err(CodecError::Aligned)?;
+            if dense.count() != range.count() as usize || dense.stride() != range.stride() as usize
+            {
+                return Err(CodecError::MalformedConstantRange);
+            }
+        }
+    }
 
     let mut payloads = vec![
         (
@@ -738,8 +746,13 @@ fn validate_constant_range_sections(
                 }
             }
             StorageProfile::DenseAligned => {
-                DenseRange::parse_stored_layout(bytes, section.count as usize, section.stride)
+                let range = DenseRange::parse(bytes, schema, aligned_registry)
                     .map_err(CodecError::Aligned)?;
+                if range.count() != section.count as usize
+                    || range.stride() != section.stride as usize
+                {
+                    return Err(CodecError::MalformedConstantRange);
+                }
             }
             StorageProfile::Compact => {
                 compact::from_bytes(bytes, schema, compact_registry).map_err(CodecError::Phon)?;
