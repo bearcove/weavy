@@ -731,7 +731,7 @@ fn validate_constant_range_sections(
         .filter(|section| section.kind >= SECTION_CONSTANT_RANGE_BASE)
     {
         let profile = section.profile.ok_or(CodecError::MalformedDirectory)?;
-        if section.stride == 0 || section.count == 0 {
+        if section.stride == 0 {
             return Err(CodecError::MalformedConstantRange);
         }
         let schema = SchemaId::from_raw(section.schema_id);
