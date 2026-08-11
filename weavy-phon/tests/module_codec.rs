@@ -272,12 +272,16 @@ fn borrowed_ranges_reject_bad_schema_bounds_alignment_and_count() {
 
 #[test]
 fn borrowed_dense_range_keeps_fixed_rows_in_module_bytes() {
-    let payload = phon_storage::DenseRangeWriter::encode(
-        8,
-        4,
-        [1u8, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0],
-    )
-    .expect("dense rows");
+    let (schemas, root) = range_schema();
+    let registry = AlignedRegistry::new(schemas.clone());
+    let mut rows = VArray::new();
+    for value in [1u32, 2] {
+        let mut row = VObject::new();
+        row.insert(VString::new("value"), Value::from(value));
+        rows.push(row);
+    }
+    let payload =
+        phon_storage::DenseRangeWriter::encode(&rows.into(), root, &registry).expect("dense rows");
     let module = WeavyModule::new(
         ModuleManifest::new("dense", [DialectRequirement::new("test", 1, 0)], [0]),
         DenseLowered::new(
@@ -290,22 +294,48 @@ fn borrowed_dense_range_keeps_fixed_rows_in_module_bytes() {
         ConstantPool::new(vec![Constant::new(0x42, vec![1])]),
     )
     .with_constant_ranges(vec![
-        ConstantRange::new(
-            range_schema().0,
-            1,
-            StorageProfile::DenseAligned,
-            2,
-            8,
-            payload,
-        )
-        .expect("range"),
+        ConstantRange::new(schemas, 1, StorageProfile::DenseAligned, 2, 4, payload).expect("range"),
     ]);
     let bytes = save::<TestCodec>(&module).expect("save");
     let borrowed = load_borrowed::<TestCodec>(&bytes).expect("borrowed load");
     let range = borrowed.dense_range(0).expect("dense range");
-    assert_eq!(range.row(1).expect("second row"), &[3, 0, 0, 0, 4, 0, 0, 0]);
+    assert_eq!(range.row(1).expect("second row"), &[2, 0, 0, 0]);
     assert_eq!(
         range.bytes().as_ptr(),
         borrowed.constant_ranges()[0].bytes().as_ptr()
     );
+}
+
+#[test]
+fn borrowed_dense_range_rejects_declared_schema_layout_mismatch() {
+    let (schemas, root) = range_schema();
+    let registry = AlignedRegistry::new(schemas.clone());
+    let mut rows = VArray::new();
+    let mut row = VObject::new();
+    row.insert(VString::new("value"), Value::from(1u32));
+    rows.push(row);
+    let payload =
+        phon_storage::DenseRangeWriter::encode(&rows.into(), root, &registry).expect("dense rows");
+    let module = WeavyModule::new(
+        ModuleManifest::new("dense", [DialectRequirement::new("test", 1, 0)], [0]),
+        DenseLowered::new(
+            vec![WeavyOp::Intrinsic(TestIntrinsic {
+                constant: ConstantId::new(0),
+                range: ConstantRangeId::new(0),
+            })],
+            Vec::new(),
+        ),
+        ConstantPool::new(vec![Constant::new(0x42, vec![1])]),
+    )
+    .with_constant_ranges(vec![
+        ConstantRange::new(schemas, 1, StorageProfile::DenseAligned, 1, 8, payload)
+            .expect("semantic range"),
+    ]);
+    assert!(matches!(
+        save::<TestCodec>(&module),
+        Err(CodecError::MalformedConstantRange)
+            | Err(CodecError::Aligned(
+                phon_storage::AlignedError::WrongDenseLayout { .. }
+            ))
+    ));
 }
