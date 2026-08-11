@@ -13,8 +13,8 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 blake3.workspace = true
 weavy.workspace = true
-phon-schema = { path = "../../phon-weavy-module-phase2/rust/phon-schema" }
-phon-storage = { path = "../../phon-weavy-module-phase2/rust/phon-storage" }
+phon-schema = { path = "../../phon/rust/phon-schema" }
+phon-storage = { path = "../../phon/rust/phon-storage" }
 facet-value = { git = "https://github.com/facet-rs/facet", rev = "5705fa6c51289bea49f5729c52dc5e23cedce4f8" }
 
 [lints]
