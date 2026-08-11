@@ -229,3 +229,43 @@ fn malformed_modules_are_rejected() {
         Err(CodecError::UnknownRequiredSection { .. }) | Err(CodecError::IntegrityMismatch { .. })
     ));
 }
+
+fn rehash(bytes: &mut [u8]) {
+    let hash = blake3::hash(&bytes[64..]);
+    bytes[48..64].copy_from_slice(&hash.as_bytes()[..16]);
+}
+
+#[test]
+fn borrowed_ranges_reject_bad_schema_bounds_alignment_and_count() {
+    let bytes = save::<TestCodec>(&fixture()).expect("save");
+    let report = inspect(&bytes).expect("inspect");
+    let section = report
+        .sections
+        .iter()
+        .find(|section| section.name == "constant_range.0")
+        .expect("range section");
+
+    let mut corrupted = bytes.clone();
+    corrupted[section.offset as usize + 16] ^= 1;
+    rehash(&mut corrupted);
+    assert!(matches!(
+        load_borrowed::<TestCodec>(&corrupted),
+        Err(CodecError::Aligned(_))
+    ));
+
+    let mut truncated = bytes.clone();
+    truncated.truncate(truncated.len() - 1);
+    assert!(matches!(
+        load_borrowed::<TestCodec>(&truncated),
+        Err(CodecError::Truncated { .. })
+    ));
+
+    let mut bad_alignment = bytes.clone();
+    let offset = section.offset as usize;
+    bad_alignment[offset + 24..offset + 32].copy_from_slice(&65u64.to_le_bytes());
+    rehash(&mut bad_alignment);
+    assert!(matches!(
+        load_borrowed::<TestCodec>(&bad_alignment),
+        Err(CodecError::Aligned(_))
+    ));
+}

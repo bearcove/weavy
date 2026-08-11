@@ -1343,3 +1343,61 @@ impl fmt::Display for CodecError {
     }
 }
 impl std::error::Error for CodecError {}
+
+#[cfg(test)]
+mod range_validation_tests {
+    use super::*;
+
+    #[test]
+    fn aligned_range_count_must_match_directory() {
+        let row = Schema {
+            id: SchemaId::from_raw(1),
+            type_params: Vec::new(),
+            kind: SchemaKind::Struct {
+                name: "CountRow".into(),
+                fields: vec![field("value", Primitive::U32)],
+            },
+        };
+        let list = Schema {
+            id: SchemaId::from_raw(2),
+            type_params: Vec::new(),
+            kind: SchemaKind::List {
+                element: SchemaRef::concrete(row.id),
+            },
+        };
+        let schemas = resolve_ids(vec![row, list]);
+        let root = schemas[1].id;
+        let compact_registry = Registry::try_new(schemas.clone()).expect("compact registry");
+        let aligned_registry = AlignedRegistry::try_new(schemas).expect("aligned registry");
+        let mut rows = VArray::new();
+        for value in [1u32, 2, 3] {
+            let mut object = VObject::new();
+            object.insert(VString::new("value"), Value::from(value));
+            rows.push(object);
+        }
+        let bytes =
+            phon_storage::AlignedWriter::encode(&Value::from(rows), root, &aligned_registry)
+                .expect("aligned rows");
+        let parsed = Parsed {
+            bytes: &bytes,
+            sections: vec![SectionReport {
+                name: "constant_range.0".into(),
+                kind: SECTION_CONSTANT_RANGE_BASE,
+                offset: 0,
+                encoded_len: bytes.len() as u64,
+                decoded_len: bytes.len() as u64,
+                alignment: 64,
+                schema_id: root.as_u64(),
+                flags: FLAG_REQUIRED,
+                profile: Some(StorageProfile::Aligned),
+                count: 4,
+                stride: 32,
+            }],
+            identity: [0; 16],
+        };
+        assert!(matches!(
+            validate_constant_range_sections(&parsed, &compact_registry, &aligned_registry),
+            Err(CodecError::MalformedConstantRange)
+        ));
+    }
+}
