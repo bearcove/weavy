@@ -1,37 +1,97 @@
+use facet_value::{VArray, VObject, VString, Value};
+use phon_schema::{
+    Field, Primitive, Schema, SchemaId, SchemaKind, SchemaRef, primitive_id, resolve_ids,
+};
+use phon_storage::{AlignedRegistry, AlignedWriter};
 use weavy::ir::{ControlOp, WeavyOp};
 use weavy::module::{
-    Constant, ConstantId, ConstantPool, ConstantReference, DialectRequirement, IntrinsicContract,
-    ModuleManifest, WeavyModule,
+    Constant, ConstantId, ConstantPool, ConstantRange, ConstantRangeId, ConstantRangeReference,
+    ConstantReference, DialectRequirement, IntrinsicContract, ModuleManifest, ModuleVerifier,
+    StorageProfile, WeavyModule,
 };
 use weavy::{BlockRef, DenseLowered};
-use weavy_phon::{CodecError, IntrinsicCodec, inspect, load, save};
+use weavy_phon::{CodecError, IntrinsicCodec, inspect, load, load_borrowed, save};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TestIntrinsic {
     constant: ConstantId,
+    range: ConstantRangeId,
 }
+
 impl IntrinsicContract for TestIntrinsic {
     fn constant_references(&self, visit: &mut dyn FnMut(ConstantReference)) {
         visit(ConstantReference::new(self.constant, 0x42));
     }
+
+    fn constant_range_references(&self, visit: &mut dyn FnMut(ConstantRangeReference)) {
+        visit(ConstantRangeReference::new(
+            self.range,
+            range_schema().1,
+            StorageProfile::Aligned,
+        ));
+    }
 }
+
 struct TestCodec;
+
 impl IntrinsicCodec for TestCodec {
     type Intrinsic = TestIntrinsic;
     const DIALECT: &'static str = "test";
     const SCHEMA_ID: u64 = 0x7711;
+
     fn encode(intrinsic: &Self::Intrinsic, out: &mut Vec<u8>) {
         out.extend_from_slice(&intrinsic.constant.index().to_le_bytes());
+        out.extend_from_slice(&intrinsic.range.index().to_le_bytes());
     }
+
     fn decode(bytes: &[u8]) -> Result<Self::Intrinsic, CodecError> {
-        if bytes.len() != 4 {
+        if bytes.len() != 8 {
             return Err(CodecError::MalformedIntrinsic);
         }
         Ok(TestIntrinsic {
-            constant: ConstantId::new(u32::from_le_bytes(bytes.try_into().expect("length"))),
+            constant: ConstantId::new(u32::from_le_bytes(bytes[..4].try_into().expect("length"))),
+            range: ConstantRangeId::new(u32::from_le_bytes(bytes[4..].try_into().expect("length"))),
         })
     }
 }
+
+fn range_schema() -> (Vec<Schema>, SchemaId) {
+    let row = Schema {
+        id: SchemaId::from_raw(1),
+        type_params: Vec::new(),
+        kind: SchemaKind::Struct {
+            name: "TestRow".into(),
+            fields: vec![Field {
+                name: "value".into(),
+                schema: SchemaRef::concrete(primitive_id(Primitive::U32)),
+                required: true,
+            }],
+        },
+    };
+    let list = Schema {
+        id: SchemaId::from_raw(2),
+        type_params: Vec::new(),
+        kind: SchemaKind::List {
+            element: SchemaRef::concrete(row.id),
+        },
+    };
+    let schemas = resolve_ids(vec![row, list]);
+    let root = schemas[1].id;
+    (schemas, root)
+}
+
+fn aligned_rows() -> Vec<u8> {
+    let (schemas, root) = range_schema();
+    let registry = AlignedRegistry::new(schemas);
+    let mut rows = VArray::new();
+    for value in [1u32, 2, 3] {
+        let mut row = VObject::new();
+        row.insert(VString::new("value"), Value::from(value));
+        rows.push(row);
+    }
+    AlignedWriter::encode(&Value::from(rows), root, &registry).expect("aligned rows")
+}
+
 fn fixture() -> WeavyModule<TestIntrinsic> {
     WeavyModule::new(
         ModuleManifest::new(
@@ -43,6 +103,7 @@ fn fixture() -> WeavyModule<TestIntrinsic> {
             vec![
                 WeavyOp::Intrinsic(TestIntrinsic {
                     constant: ConstantId::new(0),
+                    range: ConstantRangeId::new(0),
                 }),
                 WeavyOp::Control(ControlOp::CallBlock {
                     block: BlockRef::new(0),
@@ -53,6 +114,17 @@ fn fixture() -> WeavyModule<TestIntrinsic> {
         ),
         ConstantPool::new(vec![Constant::new(0x42, vec![1, 2, 3, 4])]),
     )
+    .with_constant_ranges(vec![
+        ConstantRange::new(
+            range_schema().0,
+            1,
+            StorageProfile::Aligned,
+            3,
+            32,
+            aligned_rows(),
+        )
+        .expect("range"),
+    ])
 }
 #[test]
 fn weavy_bytes_round_trip_deterministically() {
@@ -60,8 +132,45 @@ fn weavy_bytes_round_trip_deterministically() {
     let first = save::<TestCodec>(&module).expect("save");
     let loaded = load::<TestCodec>(&first).expect("load");
     assert_eq!(loaded, module);
+    assert_eq!(loaded.constant_ranges(), module.constant_ranges());
     assert_eq!(save::<TestCodec>(&loaded).expect("save again"), first);
 }
+
+#[test]
+fn borrowed_load_keeps_aligned_range_in_module_bytes() {
+    let first = save::<TestCodec>(&fixture()).expect("save");
+    let report = inspect(&first).expect("inspect");
+    let section = report
+        .sections
+        .iter()
+        .find(|section| section.name == "constant_range.0")
+        .expect("range section");
+    let borrowed = load_borrowed::<TestCodec>(&first).expect("borrowed load");
+    borrowed
+        .admit(&ModuleVerifier::new([DialectRequirement::new(
+            "test", 1, 0,
+        )]))
+        .expect("borrowed admission");
+    let range = &borrowed.constant_ranges()[0];
+    assert_eq!(
+        range.bytes().as_ptr(),
+        first[section.offset as usize..].as_ptr(),
+    );
+    let document = borrowed.aligned_document(0).expect("aligned document");
+    assert_eq!(document.root().len().expect("range length"), 3);
+    assert_eq!(
+        document
+            .root()
+            .index(1)
+            .expect("second row")
+            .field("value")
+            .expect("value field")
+            .as_u32()
+            .expect("u32"),
+        2,
+    );
+}
+
 #[test]
 fn inspect_reports_discoverable_module_facts() {
     let bytes = save::<TestCodec>(&fixture()).expect("save");
@@ -70,6 +179,9 @@ fn inspect_reports_discoverable_module_facts() {
     assert_eq!(report.program_op_count, 3);
     assert_eq!(report.block_count, 1);
     assert_eq!(report.constant_count, 1);
+    assert_eq!(report.constant_ranges.len(), 1);
+    assert_eq!(report.constant_ranges[0].count, 3);
+    assert_eq!(report.constant_ranges[0].profile, StorageProfile::Aligned);
     assert!(
         report
             .sections
@@ -80,9 +192,10 @@ fn inspect_reports_discoverable_module_facts() {
         report
             .sections
             .iter()
-            .any(|section| section.name == "constants")
+            .any(|section| section.name == "constant_range.0")
     );
 }
+
 #[test]
 fn malformed_modules_are_rejected() {
     let bytes = save::<TestCodec>(&fixture()).expect("save");

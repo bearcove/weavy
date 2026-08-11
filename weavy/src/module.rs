@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use crate::BlockRef;
 use crate::ir::{AggregateOp, ControlOp, DenseWeavyLowered, WeavyOp};
+use phon_schema::{Schema, SchemaId};
 
 /// Stable index in a module-local constant address space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -23,6 +24,117 @@ impl ConstantId {
     pub const fn index(self) -> u32 {
         self.0
     }
+}
+
+/// Stable index in a module-local typed constant-range address space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConstantRangeId(u32);
+
+impl ConstantRangeId {
+    #[must_use]
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// PHON physical profile used by one typed constant range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StorageProfile {
+    Compact,
+    Aligned,
+}
+
+/// One homogeneous typed constant range.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConstantRange {
+    schemas: Vec<Schema>,
+    schema_id: SchemaId,
+    profile: StorageProfile,
+    count: u32,
+    stride: u32,
+    bytes: Vec<u8>,
+}
+
+impl ConstantRange {
+    pub fn new(
+        schemas: Vec<Schema>,
+        root_index: usize,
+        profile: StorageProfile,
+        count: u32,
+        stride: u32,
+        bytes: Vec<u8>,
+    ) -> Result<Self, ConstantRangeError> {
+        if root_index >= schemas.len() {
+            return Err(ConstantRangeError::InvalidRootIndex {
+                index: root_index,
+                schema_count: schemas.len(),
+            });
+        }
+        let resolved = phon_schema::resolve_ids(schemas);
+        let schema_id = resolved[root_index].id;
+        Ok(Self {
+            schemas: resolved,
+            schema_id,
+            profile,
+            count,
+            stride,
+            bytes,
+        })
+    }
+
+    #[must_use]
+    pub fn schemas(&self) -> &[Schema] {
+        &self.schemas
+    }
+
+    #[must_use]
+    pub const fn schema_id(&self) -> SchemaId {
+        self.schema_id
+    }
+
+    #[must_use]
+    pub const fn profile(&self) -> StorageProfile {
+        self.profile
+    }
+
+    #[must_use]
+    pub const fn count(&self) -> u32 {
+        self.count
+    }
+
+    #[must_use]
+    pub const fn stride(&self) -> u32 {
+        self.stride
+    }
+
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConstantRangeError {
+    InvalidRootIndex { index: usize, schema_count: usize },
+}
+
+impl fmt::Display for ConstantRangeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid typed constant range: {self:?}")
+    }
+}
+
+impl std::error::Error for ConstantRangeError {}
+
+/// Metadata required to admit a borrowed constant range without owning its bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConstantRangeMetadata {
+    pub schema_id: SchemaId,
+    pub profile: StorageProfile,
 }
 
 /// One typed constant's schema identity and encoded PHON payload.
@@ -194,6 +306,7 @@ pub struct WeavyModule<Intrinsic> {
     manifest: ModuleManifest,
     program: DenseWeavyLowered<Intrinsic>,
     constants: ConstantPool,
+    constant_ranges: Vec<ConstantRange>,
 }
 
 impl<Intrinsic> WeavyModule<Intrinsic> {
@@ -206,6 +319,7 @@ impl<Intrinsic> WeavyModule<Intrinsic> {
         Self {
             manifest,
             program,
+            constant_ranges: Vec::new(),
             constants,
         }
     }
@@ -234,6 +348,22 @@ impl<Intrinsic> WeavyModule<Intrinsic> {
     pub fn constants_mut(&mut self) -> &mut ConstantPool {
         &mut self.constants
     }
+
+    #[must_use]
+    pub fn with_constant_ranges(mut self, constant_ranges: Vec<ConstantRange>) -> Self {
+        self.constant_ranges = constant_ranges;
+        self
+    }
+
+    #[must_use]
+    pub fn constant_ranges(&self) -> &[ConstantRange] {
+        &self.constant_ranges
+    }
+
+    #[must_use]
+    pub fn constant_ranges_mut(&mut self) -> &mut [ConstantRange] {
+        &mut self.constant_ranges
+    }
 }
 
 /// One intrinsic reference to a typed constant.
@@ -253,9 +383,34 @@ impl ConstantReference {
     }
 }
 
+/// One intrinsic reference to a homogeneous typed constant range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConstantRangeReference {
+    id: ConstantRangeId,
+    expected_schema: SchemaId,
+    expected_profile: StorageProfile,
+}
+
+impl ConstantRangeReference {
+    #[must_use]
+    pub const fn new(
+        id: ConstantRangeId,
+        expected_schema: SchemaId,
+        expected_profile: StorageProfile,
+    ) -> Self {
+        Self {
+            id,
+            expected_schema,
+            expected_profile,
+        }
+    }
+}
+
 /// Admission contract implemented by each durable intrinsic vocabulary.
 pub trait IntrinsicContract {
     fn constant_references(&self, visit: &mut dyn FnMut(ConstantReference));
+
+    fn constant_range_references(&self, _visit: &mut dyn FnMut(ConstantRangeReference)) {}
 }
 
 /// Admission context for one runtime's supported dialect set.
@@ -279,8 +434,22 @@ impl ModuleVerifier {
         module: WeavyModule<Intrinsic>,
     ) -> Result<AdmittedModule<Intrinsic>, AdmissionError> {
         self.verify_manifest(module.manifest())?;
-        verify_program(module.program(), module.constants())?;
+        verify_program(
+            module.program(),
+            module.constants(),
+            module.constant_ranges(),
+        )?;
         Ok(AdmittedModule { module })
+    }
+    pub fn verify_parts<Intrinsic: IntrinsicContract>(
+        &self,
+        manifest: &ModuleManifest,
+        program: &DenseWeavyLowered<Intrinsic>,
+        constants: &ConstantPool,
+        constant_ranges: &[ConstantRangeMetadata],
+    ) -> Result<(), AdmissionError> {
+        self.verify_manifest(manifest)?;
+        verify_program_metadata(program, constants, constant_ranges)
     }
 
     fn verify_manifest(&self, manifest: &ModuleManifest) -> Result<(), AdmissionError> {
@@ -313,10 +482,16 @@ impl ModuleVerifier {
 fn verify_program<Intrinsic: IntrinsicContract>(
     program: &DenseWeavyLowered<Intrinsic>,
     constants: &ConstantPool,
+    constant_ranges: &[ConstantRange],
 ) -> Result<(), AdmissionError> {
-    verify_ops(&program.program, program.blocks.len(), constants)?;
+    verify_ops(
+        &program.program,
+        program.blocks.len(),
+        constants,
+        constant_ranges,
+    )?;
     for block in &program.blocks {
-        verify_ops(block, program.blocks.len(), constants)?;
+        verify_ops(block, program.blocks.len(), constants, constant_ranges)?;
     }
     Ok(())
 }
@@ -325,11 +500,45 @@ fn verify_ops<Intrinsic: IntrinsicContract>(
     ops: &[WeavyOp<BlockRef, Intrinsic>],
     block_count: usize,
     constants: &ConstantPool,
+    constant_ranges: &[ConstantRange],
+) -> Result<(), AdmissionError> {
+    let metadata = constant_ranges
+        .iter()
+        .map(|range| ConstantRangeMetadata {
+            schema_id: range.schema_id,
+            profile: range.profile,
+        })
+        .collect::<Vec<_>>();
+    verify_ops_metadata(ops, block_count, constants, &metadata)
+}
+
+fn verify_program_metadata<Intrinsic: IntrinsicContract>(
+    program: &DenseWeavyLowered<Intrinsic>,
+    constants: &ConstantPool,
+    constant_ranges: &[ConstantRangeMetadata],
+) -> Result<(), AdmissionError> {
+    verify_ops_metadata(
+        &program.program,
+        program.blocks.len(),
+        constants,
+        constant_ranges,
+    )?;
+    for block in &program.blocks {
+        verify_ops_metadata(block, program.blocks.len(), constants, constant_ranges)?;
+    }
+    Ok(())
+}
+
+fn verify_ops_metadata<Intrinsic: IntrinsicContract>(
+    ops: &[WeavyOp<BlockRef, Intrinsic>],
+    block_count: usize,
+    constants: &ConstantPool,
+    constant_ranges: &[ConstantRangeMetadata],
 ) -> Result<(), AdmissionError> {
     for op in ops {
         match op {
             WeavyOp::Control(ControlOp::CallBlock { block, .. }) => {
-                verify_block(*block, block_count)?;
+                verify_block(*block, block_count)?
             }
             WeavyOp::Control(ControlOp::CallBlockThen { block, then, .. }) => {
                 verify_block(*block, block_count)?;
@@ -356,6 +565,31 @@ fn verify_ops<Intrinsic: IntrinsicContract>(
                             id: reference.id,
                             expected: reference.expected_schema,
                             actual: constant.schema_id,
+                        });
+                    }
+                });
+                intrinsic.constant_range_references(&mut |reference| {
+                    if error.is_some() {
+                        return;
+                    }
+                    let Some(range) = constant_ranges.get(reference.id.index() as usize) else {
+                        error = Some(AdmissionError::InvalidConstantRangeId {
+                            id: reference.id,
+                            range_count: constant_ranges.len(),
+                        });
+                        return;
+                    };
+                    if range.schema_id != reference.expected_schema {
+                        error = Some(AdmissionError::WrongConstantRangeSchema {
+                            id: reference.id,
+                            expected: reference.expected_schema,
+                            actual: range.schema_id,
+                        });
+                    } else if range.profile != reference.expected_profile {
+                        error = Some(AdmissionError::WrongConstantRangeProfile {
+                            id: reference.id,
+                            expected: reference.expected_profile,
+                            actual: range.profile,
                         });
                     }
                 });
@@ -424,6 +658,20 @@ pub enum AdmissionError {
         id: ConstantId,
         expected: u64,
         actual: u64,
+    },
+    InvalidConstantRangeId {
+        id: ConstantRangeId,
+        range_count: usize,
+    },
+    WrongConstantRangeSchema {
+        id: ConstantRangeId,
+        expected: SchemaId,
+        actual: SchemaId,
+    },
+    WrongConstantRangeProfile {
+        id: ConstantRangeId,
+        expected: StorageProfile,
+        actual: StorageProfile,
     },
 }
 
