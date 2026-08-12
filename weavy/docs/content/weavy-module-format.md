@@ -2,7 +2,7 @@
 
 ## Status
 
-Design input for an independent implementation session. This document records the architectural invariants established while moving Snark parser generation out of Dibs process startup. It is intentionally a module-format requirement, not a Snark artifact proposal.
+Historical design input retained for the Snark/Dibs module-format evidence and rejected-artifact measurements. It is superseded by the owner-approved [Weavy bytecode architecture v6](weavy-bytecode-architecture.md), which is authoritative for the durable module, semantic machine, admission, interpreter, lowering, native backends, experimental gates, and migration sequence. Where this document uses the earlier dialect/intrinsic/DenseWeavyLowered model or leaves a contract provisional, architecture v6 governs.
 
 ## Problem
 
