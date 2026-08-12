@@ -137,6 +137,48 @@ fn weavy_bytes_round_trip_deterministically() {
 }
 
 #[test]
+fn large_constant_round_trips_deterministically() {
+    let payload = (0..32 * 1024 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let module = WeavyModule::new(
+        ModuleManifest::new(
+            "large.constant",
+            [DialectRequirement::new("test", 1, 0)],
+            [0],
+        ),
+        DenseLowered::new(
+            vec![WeavyOp::Intrinsic(TestIntrinsic {
+                constant: ConstantId::new(0),
+                range: ConstantRangeId::new(0),
+            })],
+            Vec::new(),
+        ),
+        ConstantPool::new(vec![Constant::new(0x42, payload)]),
+    )
+    .with_constant_ranges(vec![
+        ConstantRange::new(
+            range_schema().0,
+            1,
+            StorageProfile::Aligned,
+            3,
+            32,
+            aligned_rows(),
+        )
+        .expect("range"),
+    ]);
+
+    let first = save::<TestCodec>(&module).expect("save");
+    let borrowed = load_borrowed::<TestCodec>(&first).expect("borrowed load");
+    assert_eq!(
+        borrowed.constants()[0].bytes(),
+        module.constants()[0].bytes()
+    );
+    let owned = load::<TestCodec>(&first).expect("owned load");
+    assert_eq!(save::<TestCodec>(&owned).expect("save again"), first);
+}
+
+#[test]
 fn borrowed_load_keeps_aligned_range_in_module_bytes() {
     let first = save::<TestCodec>(&fixture()).expect("save");
     let report = inspect(&first).expect("inspect");
