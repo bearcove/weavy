@@ -1064,7 +1064,7 @@ No gate is a free-floating foundation. Every production cut after Gate 0 migrate
 
 ## Approval decision
 
-This professionally reviewed candidate closes the original eleven bytecode blockers, the Vix-first review's thirteen corrections, and the final five professional findings:
+This professionally reviewed and owner-approved v6 closes the original eleven bytecode blockers, the Vix-first review's thirteen corrections, and the final five professional findings:
 
 1. `ExecutableId` becomes available only after complete canonical semantic decoding and claim comparison;
 2. verifier-owned cleanup obligations and `AbandonPlan`s govern task kill, replay, concurrent completion, and armed pollpoints;
