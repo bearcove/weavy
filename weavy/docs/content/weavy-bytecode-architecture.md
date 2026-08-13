@@ -596,11 +596,11 @@ Rejected { request: Req, fault: TaskFault }
 
 Request ownership transfers only with `Accepted`. `Rejected` returns ownership-equivalent unchanged request state to the task and performs no transfer cleanup. The task then follows the declared fault successor or abrupt-fault plan at the original invocation site.
 
-The `AcceptanceToken` binds import identity, task generation, site, request identity, and response contract and is created exactly once. No version-1 import may choose an alternative rejection-consumes-request policy. Completion is accepted at most once by the retained continuation; the full response is validated into temporary storage before continuation state changes, so invalid or stale completion performs no partial state mutation.
+The `AcceptanceToken` binds import identity, stable async completion epoch `e`, site, request identity, and response contract and is created exactly once. Task-state CAS revision is separate and never validates completion. No version-1 import may choose an alternative rejection-consumes-request policy. The authoritative async task state accepts at most one response for token epoch `e`; it may retain that response in `EarlyResponse` before a continuation exists or pair it with a parked continuation. The full response is validated into temporary storage before the state transition, so invalid, stale, duplicate, or wrong-epoch completion performs no partial mutation.
 
 For Vix, the scheduler derives or joins the primitive demand, and the demand-owned effect ticket may survive task death, replay, or another waiter joining. Killing a Weavy task does not by itself cancel, restart, memoize, publish, or receipt the external operation. Final-obligation cancellation, late completion, replay, and join behavior remain Vix/Vixen policy.
 
-Native continuation materialization exists only on a taken slow edge and is checked against the admitted `ContinuationSchema`. If materialization allocation fails, the task faults before scheduler handoff and runs the exact cleanup plan. An untaken interior pollpoint performs no continuation spill.
+Native continuation materialization exists only on a taken slow edge and is checked against the admitted `ContinuationSchema`. For async import, scheduler acceptance first commits its token/epoch into authoritative task state; a later materialization failure detaches the token, requests advisory cancellation, and runs the exact failed-parking/fault cleanup without reclaiming the accepted request. For `await_input`, materialization failure occurs before parking. An untaken interior pollpoint performs no continuation spill.
 
 Full edge safepoints and cheap interior pollpoints are distinct. Edge safepoints may yield to the embedding at wire/primitive boundaries. Interior pollpoints occur at loop backedges and bounded long operations for cancellation, cooperative preemption, debugging, profiling, counter flushing, and future memory management; when unarmed they perform no Vix identity, memo, receipt, publication, demand, or scheduler operation and cannot publish partial molten state.
 
@@ -610,7 +610,7 @@ Every admitted task state at which the embedding may discard a task has a verifi
 
 The abandonment plan covers every live task-owned affine value, builder, borrow end, invocation capability, and frame obligation across the complete frame chain. It excludes any request whose ownership already transferred with `Accepted` and excludes scheduler-owned demand or ticket state.
 
-Abandonment first marks the task terminal and invalidates its completion generation, then executes its plan exactly once on the required affinity. A concurrent or later completion is stale and cannot mutate the task. Cleanup failure leaves the task discarded and produces a typed task-cleanup diagnostic; it does not cancel, restart, publish, or otherwise alter the Vix demand or ticket.
+Abandonment first commits a non-resumable `Abandoning` state and invalidates any readiness epoch `q` or async completion epoch `e`; this is not yet terminal/join-visible. It then executes the verifier-owned exactly-once obligation ledger on required affinity. Only after the ledger completes does one CAS commit `Terminal` and publish completion/join visibility. A concurrent or later supply/completion is stale and cannot mutate the task. Cleanup failure leaves the task discarded, later obligations still run once, and a typed task-cleanup diagnostic is retained separately; it does not cancel, restart, publish, or otherwise alter Vix demand or ticket state.
 
 An interior pollpoint that may park and later resume carries a `ContinuationSchema` and is subject to the same `SuspendSafe` live-set validation as any other suspension site. A pollpoint without such a schema may observe cancellation or request transfer to a later full safepoint, but may not park a resumable task with unmaterialized state.
 
@@ -764,13 +764,15 @@ Report A→B generic-native benefit and B→C stencil-emission benefit separatel
 Native compilation is optional, bounded, and fallible:
 
 ```text
-compile(program, target_profile, compilation_limits)
-    -> Result<NativeArtifact, NativeCompileError>
+compile(legalized_program_handle, target_profile, compilation_limits)
+    -> Result<UnboundNativeArtifact, NativeCompileError>
+link(unbound_artifact, bound_program)
+    -> Result<NativeArtifact, NativeLinkError>
 ```
 
 `CompilationLimits` bounds total functions, semantic and target-MIR operations, CFG edges, allocator work, spill and copy records, layout/relaxation iterations, veneers, literal pools, relocations, code bytes, read-only data bytes, metadata bytes, peak scratch bytes, retained compiler bytes, and total compiler work units.
 
-Every cumulative size and allocation is checked before reservation. In-process compilers use fallible allocation. A compiler that cannot meet those guarantees executes in an isolated worker with enforced memory and CPU limits. Limit, allocation, timeout, unsupported-form, or internal-validation failure publishes no artifact and leaves the admitted interpreter lane available. No module feature or consumer request can make successful native compilation a semantic requirement.
+Every cumulative size and allocation is checked before reservation. Compilation failure produces no `UnboundNativeArtifact` and leaves interpretation available. An unbound artifact has no public entrypoint, publication, direct binding pointer, or binding lease. Linking validates exact declarations, acquires or guards binding authority, performs mapping/relocation/protection/registration, and publishes all-or-nothing; failure rolls back and exposes no entrypoint. No module feature or consumer request can make successful native compilation or linking a semantic requirement.
 
 Automatic promotion is additionally governed by bounded process-wide queue and code-cache policy so many admitted programs cannot force unbounded concurrent compilation or retained code.
 
@@ -879,7 +881,7 @@ Publication is all-or-nothing:
 
 Failure before exposure reverses every completed registration and releases every staged mapping and reference.
 
-Retirement atomically withdraws entrypoint handles, preventing new execution-reference acquisition; waits for executing references, unwind users, entrypoint leases, image leases, and binding leases to quiesce; removes applicable unwind/debug/CFG registrations; releases all executable, read-only, and writable mappings; and finally drops retained program, image, and binding references.
+Retirement atomically withdraws entrypoint handles and prevents new execution-reference acquisition. It waits only for independently acquired external pins—executing references, unwind users, `EntrypointLease`s, and exported image/binding inspection pins—to quiesce; artifact-owned backing `ImageLease`/`BindingLease` references are excluded, with shared refcounts considered quiescent when only the retirement owner's references remain. It then removes unwind/debug/CFG registrations, releases executable/read-only/writable mappings, and finally drops artifact-owned binding leases, image leases, program/image/binding references, and the artifact itself.
 
 No mapping or reference may be released while generated code can execute, unwind, inspect a literal/table, or call a direct-linked binding through it.
 
