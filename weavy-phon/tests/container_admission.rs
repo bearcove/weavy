@@ -630,3 +630,28 @@ fn rejects_unbounded_legacy_counts_before_allocation() {
         assert_all_entry_points_reject(&bytes);
     }
 }
+
+#[test]
+fn semantic_entry_points_reject_noncanonical_schema_bytes_but_structural_inspection_accepts() {
+    let mut bytes = valid_bytes();
+    let schemas = entry(&bytes, SECTION_SCHEMAS);
+    let schemas_offset = read_u64(&bytes, schemas.offset_at) as usize;
+    let first_schema_len = read_u32(&bytes, schemas_offset + 4) as usize;
+    let first_schema = schemas_offset + 8;
+    assert!(first_schema_len > 21, "fixture schema encoding changed");
+    assert_eq!(&bytes[first_schema + 19..first_schema + 21], b"id");
+
+    bytes[first_schema + 19..first_schema + 21].copy_from_slice(b"xx");
+    rehash(&mut bytes);
+
+    let limits = ContainerLimits::DEFAULT;
+    let owned = load::<TestCodec>(&bytes, limits).expect_err("owned load must reject");
+    let borrowed = load_borrowed::<TestCodec>(&bytes, limits)
+        .err()
+        .expect("borrowed load must reject");
+    let semantic = inspect(&bytes, limits).expect_err("semantic inspection must reject");
+    assert!(matches!(owned, CodecError::MalformedSchemas));
+    assert!(matches!(borrowed, CodecError::MalformedSchemas));
+    assert!(matches!(semantic, CodecError::MalformedSchemas));
+    inspect_structure(&bytes, limits).expect("structural inspection does not decode schemas");
+}
