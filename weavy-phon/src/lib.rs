@@ -32,6 +32,11 @@ const SECTION_CONSTANT_RANGE_BASE: u32 = 0x1000;
 const FLAG_REQUIRED: u32 = 1;
 const PROGRAM_SCHEMA_ID: u64 = 0x0bcb_92f4_3d1a_308a;
 const CONSTANT_DIRECTORY_SCHEMA_ID: u64 = 0xd87c_d9d9_3b41_e5aa;
+const DIRECTORY_SECTION_SCHEMA_ID: u64 = 0x27e8_8229_2860_ab54;
+const DIRECTORY_SCHEMA_ID: u64 = 0xcf54_d756_8f59_3290;
+const MAX_DIRECTORY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SECTION_COUNT: usize = 1 << 16;
+const MIN_DIRECTORY_ENTRY_BYTES: usize = 73;
 
 /// Intrinsic-specific durable byte encoding.
 pub trait IntrinsicCodec {
@@ -447,8 +452,11 @@ fn parse_container(bytes: &[u8]) -> Result<Parsed<'_>, CodecError> {
     }
     let major = read_u16(bytes, 8)?;
     let minor = read_u16(bytes, 10)?;
-    if major != FORMAT_MAJOR {
+    if major != FORMAT_MAJOR || minor != FORMAT_MINOR {
         return Err(CodecError::UnsupportedFormat { major, minor });
+    }
+    if bytes[12] != 1 || bytes[13..16] != [0; 3] {
+        return Err(CodecError::MalformedHeader);
     }
     let file_len = usize_from_u64(read_u64(bytes, 16)?)?;
     if file_len != bytes.len() {
@@ -460,14 +468,15 @@ fn parse_container(bytes: &[u8]) -> Result<Parsed<'_>, CodecError> {
     let directory_offset = usize_from_u64(read_u64(bytes, 24)?)?;
     let directory_len = usize_from_u64(read_u64(bytes, 32)?)?;
     let alignment = read_u32(bytes, 40)?;
-    if alignment == 0 || !alignment.is_power_of_two() {
-        return Err(CodecError::InvalidAlignment { alignment });
-    }
     let directory_kind = read_u32(bytes, 44)?;
-    if directory_kind != DIRECTORY_SECTION_KIND {
-        return Err(CodecError::UnknownRequiredSection {
-            kind: directory_kind,
-        });
+    if directory_offset != HEADER_SIZE
+        || alignment != DIRECTORY_ALIGNMENT
+        || directory_kind != DIRECTORY_SECTION_KIND
+    {
+        return Err(CodecError::MalformedHeader);
+    }
+    if directory_len > MAX_DIRECTORY_BYTES {
+        return Err(CodecError::AdmissionLimitExceeded);
     }
     let directory_end =
         directory_offset
@@ -477,7 +486,7 @@ fn parse_container(bytes: &[u8]) -> Result<Parsed<'_>, CodecError> {
                 len: directory_len as u64,
                 file_len: bytes.len(),
             })?;
-    if directory_offset < HEADER_SIZE || directory_end > bytes.len() {
+    if directory_end > bytes.len() {
         return Err(CodecError::SectionOutOfBounds {
             offset: directory_offset as u64,
             len: directory_len as u64,
@@ -489,37 +498,152 @@ fn parse_container(bytes: &[u8]) -> Result<Parsed<'_>, CodecError> {
     if expected != actual {
         return Err(CodecError::IntegrityMismatch { expected, actual });
     }
-    let sections = decode_directory(&bytes[directory_offset..directory_end])?;
-    for section in &sections {
-        if section.alignment == 0 || !section.alignment.is_power_of_two() {
-            return Err(CodecError::InvalidAlignment {
-                alignment: section.alignment,
-            });
+    let directory_bytes = &bytes[directory_offset..directory_end];
+    let sections = decode_directory(directory_bytes)?;
+    if sections.len() > MAX_SECTION_COUNT {
+        return Err(CodecError::AdmissionLimitExceeded);
+    }
+    if encode_directory(&sections)? != directory_bytes {
+        return Err(CodecError::MalformedDirectory);
+    }
+    validate_directory_entries(bytes, directory_end, &sections)?;
+    Ok(Parsed {
+        bytes,
+        sections,
+        identity: expected,
+    })
+}
+
+fn validate_directory_entries(
+    bytes: &[u8],
+    directory_end: usize,
+    sections: &[SectionReport],
+) -> Result<(), CodecError> {
+    let mut singleton_counts = [0u8; 4];
+    let mut expected_range_kind = SECTION_CONSTANT_RANGE_BASE;
+    let mut previous_end = directory_end;
+
+    for (index, section) in sections.iter().enumerate() {
+        if sections[..index]
+            .iter()
+            .any(|candidate| candidate.name == section.name)
+        {
+            return Err(CodecError::MalformedDirectory);
+        }
+        if section.flags & !FLAG_REQUIRED != 0 {
+            return Err(CodecError::MalformedDirectory);
         }
         let start = usize_from_u64(section.offset)?;
         let len = usize_from_u64(section.encoded_len)?;
         let end = start.checked_add(len).ok_or(CodecError::SizeOverflow)?;
-        if !start.is_multiple_of(section.alignment as usize) || end > bytes.len() {
+        if section.alignment == 0
+            || !section.alignment.is_power_of_two()
+            || !start.is_multiple_of(section.alignment as usize)
+            || start < directory_end
+            || end > bytes.len()
+        {
             return Err(CodecError::SectionOutOfBounds {
                 offset: section.offset,
                 len: section.encoded_len,
                 file_len: bytes.len(),
             });
         }
-        if !matches!(
-            section.kind,
-            SECTION_MANIFEST | SECTION_SCHEMAS | SECTION_PROGRAM | SECTION_CONSTANTS
-        ) && section.kind < SECTION_CONSTANT_RANGE_BASE
-            && section.flags & FLAG_REQUIRED != 0
-        {
-            return Err(CodecError::UnknownRequiredSection { kind: section.kind });
+        let expected_start = align_up(previous_end, section.alignment as usize)?;
+        if start != expected_start || bytes[previous_end..start].iter().any(|byte| *byte != 0) {
+            return Err(CodecError::MalformedDirectory);
+        }
+        previous_end = end;
+
+        match section.kind {
+            0 | DIRECTORY_SECTION_KIND => return Err(CodecError::MalformedDirectory),
+            SECTION_MANIFEST => {
+                singleton_counts[0] = singleton_counts[0]
+                    .checked_add(1)
+                    .ok_or(CodecError::MalformedDirectory)?;
+                validate_legacy_section(section, "manifest", 1)?;
+            }
+            SECTION_SCHEMAS => {
+                singleton_counts[1] = singleton_counts[1]
+                    .checked_add(1)
+                    .ok_or(CodecError::MalformedDirectory)?;
+                validate_legacy_section(section, "schemas", 1)?;
+            }
+            SECTION_PROGRAM => {
+                singleton_counts[2] = singleton_counts[2]
+                    .checked_add(1)
+                    .ok_or(CodecError::MalformedDirectory)?;
+                validate_legacy_section(section, "program", PROGRAM_SCHEMA_ID)?;
+            }
+            SECTION_CONSTANTS => {
+                singleton_counts[3] = singleton_counts[3]
+                    .checked_add(1)
+                    .ok_or(CodecError::MalformedDirectory)?;
+                validate_legacy_section(section, "constants", CONSTANT_DIRECTORY_SCHEMA_ID)?;
+            }
+            SECTION_CONSTANT_RANGE_BASE.. => {
+                if section.kind != expected_range_kind {
+                    return Err(CodecError::MalformedDirectory);
+                }
+                expected_range_kind = expected_range_kind
+                    .checked_add(1)
+                    .ok_or(CodecError::SizeOverflow)?;
+                validate_range_section(section)?;
+            }
+            _ if section.flags & FLAG_REQUIRED != 0 => {
+                return Err(CodecError::UnknownRequiredSection { kind: section.kind });
+            }
+            _ => {}
         }
     }
-    Ok(Parsed {
-        bytes,
-        sections,
-        identity: expected,
-    })
+
+    if bytes[previous_end..].iter().any(|byte| *byte != 0) {
+        return Err(CodecError::MalformedDirectory);
+    }
+    if singleton_counts != [1; 4] {
+        return Err(CodecError::MalformedDirectory);
+    }
+    Ok(())
+}
+
+fn validate_legacy_section(
+    section: &SectionReport,
+    name: &str,
+    schema_id: u64,
+) -> Result<(), CodecError> {
+    if section.name != name
+        || section.schema_id != schema_id
+        || section.flags != FLAG_REQUIRED
+        || section.profile.is_some()
+        || section.count != 0
+        || section.stride != 0
+        || section.alignment != 8
+        || section.decoded_len != section.encoded_len
+    {
+        return Err(CodecError::MalformedDirectory);
+    }
+    Ok(())
+}
+
+fn validate_range_section(section: &SectionReport) -> Result<(), CodecError> {
+    let range_id = section.kind - SECTION_CONSTANT_RANGE_BASE;
+    if section.name != format!("constant_range.{range_id}")
+        || section.flags != FLAG_REQUIRED
+        || section.stride == 0
+        || section.decoded_len != section.encoded_len
+    {
+        return Err(CodecError::MalformedDirectory);
+    }
+    let expected_alignment = match section.profile {
+        Some(StorageProfile::Compact) => 8,
+        Some(StorageProfile::Aligned | StorageProfile::DenseAligned) => 64,
+        None => return Err(CodecError::MalformedDirectory),
+    };
+    if section.alignment != expected_alignment {
+        return Err(CodecError::InvalidAlignment {
+            alignment: section.alignment,
+        });
+    }
+    Ok(())
 }
 
 fn directory_schemas() -> (Vec<Schema>, SchemaId) {
@@ -551,10 +675,10 @@ fn directory_schemas() -> (Vec<Schema>, SchemaId) {
         },
     };
     let schemas = resolve_ids(vec![section, directory]);
-    let root = schemas[1].id;
-    (schemas, root)
+    assert_eq!(schemas[0].id.as_u64(), DIRECTORY_SECTION_SCHEMA_ID);
+    assert_eq!(schemas[1].id.as_u64(), DIRECTORY_SCHEMA_ID);
+    (schemas, SchemaId::from_raw(DIRECTORY_SCHEMA_ID))
 }
-
 fn field(name: &str, primitive: Primitive) -> Field {
     Field {
         name: name.into(),
@@ -600,37 +724,51 @@ fn encode_directory(sections: &[SectionReport]) -> Result<Vec<u8>, CodecError> {
 }
 
 fn decode_directory(bytes: &[u8]) -> Result<Vec<SectionReport>, CodecError> {
+    if bytes.len() < 4 {
+        return Err(CodecError::MalformedDirectory);
+    }
+    let encoded_count = read_u32(bytes, 0)? as usize;
+    let byte_derived_max = bytes.len().saturating_sub(4) / MIN_DIRECTORY_ENTRY_BYTES;
+    if encoded_count > MAX_SECTION_COUNT || encoded_count > byte_derived_max {
+        return Err(CodecError::AdmissionLimitExceeded);
+    }
     let (schemas, root) = directory_schemas();
     let registry = Registry::new(schemas);
     let value = compact::from_bytes(bytes, root, &registry).map_err(CodecError::Phon)?;
     let array = value.as_array().ok_or(CodecError::MalformedDirectory)?;
-    (0..array.len())
-        .map(|index| {
-            let object = array
-                .get(index)
-                .and_then(Value::as_object)
-                .ok_or(CodecError::MalformedDirectory)?;
-            Ok(SectionReport {
-                name: object_string(object, "name")?,
-                kind: object_u32(object, "kind")?,
-                offset: object_u64(object, "offset")?,
-                encoded_len: object_u64(object, "encoded_len")?,
-                decoded_len: object_u64(object, "decoded_len")?,
-                alignment: object_u32(object, "alignment")?,
-                schema_id: object_u64(object, "schema_id")?,
-                flags: object_u32(object, "flags")?,
-                profile: match object_u32(object, "profile")? {
-                    0 => None,
-                    1 => Some(StorageProfile::Compact),
-                    2 => Some(StorageProfile::Aligned),
-                    3 => Some(StorageProfile::DenseAligned),
-                    _ => return Err(CodecError::MalformedDirectory),
-                },
-                count: object_u32(object, "count")?,
-                stride: object_u32(object, "stride")?,
-            })
-        })
-        .collect()
+    if array.len() != encoded_count {
+        return Err(CodecError::MalformedDirectory);
+    }
+    let mut sections = Vec::new();
+    sections
+        .try_reserve_exact(encoded_count)
+        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
+    for index in 0..array.len() {
+        let object = array
+            .get(index)
+            .and_then(Value::as_object)
+            .ok_or(CodecError::MalformedDirectory)?;
+        sections.push(SectionReport {
+            name: object_string(object, "name")?,
+            kind: object_u32(object, "kind")?,
+            offset: object_u64(object, "offset")?,
+            encoded_len: object_u64(object, "encoded_len")?,
+            decoded_len: object_u64(object, "decoded_len")?,
+            alignment: object_u32(object, "alignment")?,
+            schema_id: object_u64(object, "schema_id")?,
+            flags: object_u32(object, "flags")?,
+            profile: match object_u32(object, "profile")? {
+                0 => None,
+                1 => Some(StorageProfile::Compact),
+                2 => Some(StorageProfile::Aligned),
+                3 => Some(StorageProfile::DenseAligned),
+                _ => return Err(CodecError::MalformedDirectory),
+            },
+            count: object_u32(object, "count")?,
+            stride: object_u32(object, "stride")?,
+        });
+    }
+    Ok(sections)
 }
 fn object_value<'a>(object: &'a VObject, name: &str) -> Result<&'a Value, CodecError> {
     object
@@ -678,13 +816,19 @@ fn decode_manifest(bytes: &[u8]) -> Result<ModuleManifest, CodecError> {
     if major != 1 || minor != 0 {
         return Err(CodecError::UnsupportedFormat { major, minor });
     }
-    let dialect_count = r.u32()?;
-    let mut dialects = Vec::with_capacity(dialect_count as usize);
+    let dialect_count = r.bounded_count(8)?;
+    let mut dialects = Vec::new();
+    dialects
+        .try_reserve_exact(dialect_count)
+        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
     for _ in 0..dialect_count {
         dialects.push(DialectRequirement::new(r.string()?, r.u16()?, r.u16()?));
     }
-    let root_count = r.u32()?;
-    let mut roots = Vec::with_capacity(root_count as usize);
+    let root_count = r.bounded_count(4)?;
+    let mut roots = Vec::new();
+    roots
+        .try_reserve_exact(root_count)
+        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
     for _ in 0..root_count {
         roots.push(r.u32()?);
     }
@@ -711,8 +855,11 @@ fn encode_schema_bundle(ranges: &[ConstantRange]) -> Vec<u8> {
 
 fn decode_schema_bundle(bytes: &[u8]) -> Result<Vec<Schema>, CodecError> {
     let mut r = Reader::new(bytes);
-    let count = r.u32()?;
-    let mut schemas = Vec::with_capacity(count as usize);
+    let count = r.bounded_count(4)?;
+    let mut schemas = Vec::new();
+    schemas
+        .try_reserve_exact(count)
+        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
     for _ in 0..count {
         schemas.push(schema_from_bytes(r.bytes()?).map_err(|_| CodecError::MalformedSchemas)?);
     }
@@ -991,8 +1138,11 @@ fn decode_program<C: IntrinsicCodec>(
 ) -> Result<DenseLowered<WeavyOp<BlockRef, C::Intrinsic>>, CodecError> {
     let mut r = Reader::new(bytes);
     let program = decode_ops::<C>(&mut r)?;
-    let count = r.u32()?;
-    let mut blocks = Vec::with_capacity(count as usize);
+    let count = r.bounded_count(4)?;
+    let mut blocks = Vec::new();
+    blocks
+        .try_reserve_exact(count)
+        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
     for _ in 0..count {
         blocks.push(decode_ops::<C>(&mut r)?);
     }
@@ -1002,8 +1152,10 @@ fn decode_program<C: IntrinsicCodec>(
 fn decode_ops<C: IntrinsicCodec>(
     r: &mut Reader<'_>,
 ) -> Result<Vec<WeavyOp<BlockRef, C::Intrinsic>>, CodecError> {
-    let count = r.u32()?;
-    let mut ops = Vec::with_capacity(count as usize);
+    let count = r.bounded_count(1)?;
+    let mut ops = Vec::new();
+    ops.try_reserve_exact(count)
+        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
     for _ in 0..count {
         ops.push(decode_op::<C>(r)?);
     }
@@ -1029,8 +1181,11 @@ fn decode_op<C: IntrinsicCodec>(
             align: r.usize()?,
         }),
         11 => {
-            let n = r.u32()?;
-            let mut segments = Vec::with_capacity(n as usize);
+            let n = r.bounded_count(24)?;
+            let mut segments = Vec::new();
+            segments
+                .try_reserve_exact(n)
+                .map_err(|_| CodecError::AdmissionLimitExceeded)?;
             for _ in 0..n {
                 segments.push(ScalarSegment {
                     offset: r.usize()?,
@@ -1180,8 +1335,11 @@ fn encode_constants(pool: &ConstantPool) -> Result<Vec<u8>, CodecError> {
 }
 fn decode_constants(bytes: &[u8]) -> Result<ConstantPool, CodecError> {
     let mut r = Reader::new(bytes);
-    let count = r.u32()?;
-    let mut constants = Vec::with_capacity(count as usize);
+    let count = r.bounded_count(12)?;
+    let mut constants = Vec::new();
+    constants
+        .try_reserve_exact(count)
+        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
     for _ in 0..count {
         constants.push(Constant::new(r.u64()?, r.bytes()?.to_vec()));
     }
@@ -1311,6 +1469,19 @@ impl<'a> Reader<'a> {
         let len = self.u32()? as usize;
         self.take(len)
     }
+    fn bounded_count(&mut self, minimum_bytes_per_item: usize) -> Result<usize, CodecError> {
+        let count = self.u32()? as usize;
+        let max = self
+            .bytes
+            .len()
+            .saturating_sub(self.pos)
+            .checked_div(minimum_bytes_per_item)
+            .ok_or(CodecError::SizeOverflow)?;
+        if count > max {
+            return Err(CodecError::AdmissionLimitExceeded);
+        }
+        Ok(count)
+    }
     fn string(&mut self) -> Result<String, CodecError> {
         String::from_utf8(self.bytes()?.to_vec()).map_err(|_| CodecError::InvalidUtf8)
     }
@@ -1335,6 +1506,8 @@ impl<'a> Reader<'a> {
 #[non_exhaustive]
 pub enum CodecError {
     BadMagic,
+    MalformedHeader,
+    AdmissionLimitExceeded,
     UnsupportedFormat {
         major: u16,
         minor: u16,

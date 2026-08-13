@@ -20,6 +20,10 @@ pub use exec::{
     FaultSite, LaneFacts, LaneKind, LaneRequest, PublishedDescriptor, StoreHandle,
     StructuralResult, TaskFault,
 };
+pub use module::{
+    CanonicalNameError, FeatureId, FeatureNamespace, PolicyDescriptor, PolicyHistoryError,
+    PolicyKey, PolicyRequirement, PolicyVersion,
+};
 pub use task::StructuralFieldSource;
 pub use verified::{
     AccessDefect, AccessRole, AllowedKinds, CallAbiProjection, CallContract, CallContractId,

@@ -5,10 +5,442 @@
 
 use core::fmt;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::BlockRef;
 use crate::ir::{AggregateOp, ControlOp, DenseWeavyLowered, WeavyOp};
 use phon_schema::{Schema, SchemaId};
+
+const FEATURE_ID_DOMAIN: &[u8] = b"weavy.feature.v1\0";
+
+/// Closed semantic-feature namespaces with their frozen profile sort tags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum FeatureNamespace {
+    Opcode = 0,
+    Helper = 1,
+    Relation = 2,
+    Capability = 3,
+}
+
+impl FeatureNamespace {
+    #[must_use]
+    pub const fn tag(self) -> u8 {
+        self as u8
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Opcode => "opcode",
+            Self::Helper => "helper",
+            Self::Relation => "relation",
+            Self::Capability => "capability",
+        }
+    }
+}
+
+/// A process-independent, namespace-separated semantic feature identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FeatureId([u8; 16]);
+
+impl FeatureId {
+    pub fn new(
+        namespace: FeatureNamespace,
+        canonical_name: impl AsRef<str>,
+    ) -> Result<Self, CanonicalNameError> {
+        let canonical_name = canonical_name.as_ref();
+        validate_canonical_name(canonical_name)?;
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(FEATURE_ID_DOMAIN);
+        hasher.update(namespace.as_str().as_bytes());
+        hasher.update(&[0]);
+        hasher.update(canonical_name.as_bytes());
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+        Ok(Self(bytes))
+    }
+
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; 16] {
+        self.0
+    }
+}
+
+/// A validated canonical policy identity.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PolicyKey(Arc<str>);
+
+impl PolicyKey {
+    pub fn new(key: impl AsRef<str>) -> Result<Self, CanonicalNameError> {
+        let key = key.as_ref();
+        validate_canonical_name(key)?;
+        Ok(Self(Arc::from(key)))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for PolicyKey {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// One semantic policy descriptor paired with its authority-approved digest.
+///
+/// Digest computation stays outside core until Gate 0 freezes the exact
+/// canonical PHON root and framing. Construction does not recompute or verify
+/// the supplied digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyDescriptor {
+    policy_key: PolicyKey,
+    major: u16,
+    minor: u16,
+    canonical_semantics: Vec<u8>,
+    minor_digest: [u8; 32],
+}
+
+impl PolicyDescriptor {
+    #[must_use]
+    pub fn new_with_approved_digest(
+        policy_key: PolicyKey,
+        major: u16,
+        minor: u16,
+        canonical_semantics: Vec<u8>,
+        minor_digest: [u8; 32],
+    ) -> Self {
+        Self {
+            policy_key,
+            major,
+            minor,
+            canonical_semantics,
+            minor_digest,
+        }
+    }
+
+    #[must_use]
+    pub const fn policy_key(&self) -> &PolicyKey {
+        &self.policy_key
+    }
+
+    #[must_use]
+    pub const fn major(&self) -> u16 {
+        self.major
+    }
+
+    #[must_use]
+    pub const fn minor(&self) -> u16 {
+        self.minor
+    }
+
+    #[must_use]
+    pub fn canonical_semantics(&self) -> &[u8] {
+        &self.canonical_semantics
+    }
+
+    #[must_use]
+    pub const fn minor_digest(&self) -> &[u8; 32] {
+        &self.minor_digest
+    }
+}
+
+/// Minimum compatible policy semantics required by a module.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PolicyRequirement {
+    policy_key: PolicyKey,
+    major: u16,
+    min_minor: u16,
+    required_minor_digest: [u8; 32],
+}
+
+impl PolicyRequirement {
+    #[must_use]
+    pub const fn new(
+        policy_key: PolicyKey,
+        major: u16,
+        min_minor: u16,
+        required_minor_digest: [u8; 32],
+    ) -> Self {
+        Self {
+            policy_key,
+            major,
+            min_minor,
+            required_minor_digest,
+        }
+    }
+
+    #[must_use]
+    pub const fn policy_key(&self) -> &PolicyKey {
+        &self.policy_key
+    }
+
+    #[must_use]
+    pub const fn major(&self) -> u16 {
+        self.major
+    }
+
+    #[must_use]
+    pub const fn min_minor(&self) -> u16 {
+        self.min_minor
+    }
+
+    #[must_use]
+    pub const fn required_minor_digest(&self) -> &[u8; 32] {
+        &self.required_minor_digest
+    }
+}
+
+/// One runtime's complete append-only compatible policy-minor history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyVersion {
+    policy_key: PolicyKey,
+    major: u16,
+    max_minor: u16,
+    compatible_minor_digests: Vec<[u8; 32]>,
+}
+
+impl PolicyVersion {
+    pub fn new(
+        policy_key: PolicyKey,
+        major: u16,
+        max_minor: u16,
+        compatible_minor_digests: Vec<[u8; 32]>,
+    ) -> Result<Self, PolicyHistoryError> {
+        let expected = usize::from(max_minor) + 1;
+        if compatible_minor_digests.len() != expected {
+            return Err(PolicyHistoryError::HistoryLengthMismatch {
+                max_minor,
+                actual: compatible_minor_digests.len(),
+            });
+        }
+        Ok(Self {
+            policy_key,
+            major,
+            max_minor,
+            compatible_minor_digests,
+        })
+    }
+
+    pub fn from_descriptors(
+        descriptors: impl IntoIterator<Item = PolicyDescriptor>,
+    ) -> Result<Self, PolicyHistoryError> {
+        let mut descriptors = descriptors.into_iter();
+        let first = descriptors
+            .next()
+            .ok_or(PolicyHistoryError::EmptyDescriptorHistory)?;
+        if first.minor != 0 {
+            return Err(PolicyHistoryError::DescriptorMinorMismatch {
+                index: 0,
+                actual: first.minor,
+            });
+        }
+
+        let policy_key = first.policy_key.clone();
+        let major = first.major;
+        let mut digests = vec![first.minor_digest];
+        for (offset, descriptor) in descriptors.enumerate() {
+            let index = offset + 1;
+            if descriptor.policy_key != policy_key {
+                return Err(PolicyHistoryError::DescriptorKeyMismatch {
+                    index,
+                    expected: policy_key,
+                    actual: descriptor.policy_key,
+                });
+            }
+            if descriptor.major != major {
+                return Err(PolicyHistoryError::DescriptorMajorMismatch {
+                    index,
+                    expected: major,
+                    actual: descriptor.major,
+                });
+            }
+            let expected_minor = u16::try_from(index)
+                .map_err(|_| PolicyHistoryError::DescriptorHistoryTooLong { actual: index + 1 })?;
+            if descriptor.minor != expected_minor {
+                return Err(PolicyHistoryError::DescriptorMinorMismatch {
+                    index,
+                    actual: descriptor.minor,
+                });
+            }
+            digests.push(descriptor.minor_digest);
+        }
+        let max_minor = u16::try_from(digests.len() - 1).map_err(|_| {
+            PolicyHistoryError::DescriptorHistoryTooLong {
+                actual: digests.len(),
+            }
+        })?;
+        Self::new(policy_key, major, max_minor, digests)
+    }
+
+    #[must_use]
+    pub const fn policy_key(&self) -> &PolicyKey {
+        &self.policy_key
+    }
+
+    #[must_use]
+    pub const fn major(&self) -> u16 {
+        self.major
+    }
+
+    #[must_use]
+    pub const fn max_minor(&self) -> u16 {
+        self.max_minor
+    }
+
+    #[must_use]
+    pub fn compatible_minor_digests(&self) -> &[[u8; 32]] {
+        &self.compatible_minor_digests
+    }
+
+    #[must_use]
+    pub fn is_compatible_with(&self, required: &PolicyRequirement) -> bool {
+        self.policy_key == required.policy_key
+            && self.major == required.major
+            && self.max_minor >= required.min_minor
+            && self.compatible_minor_digests[usize::from(required.min_minor)]
+                == required.required_minor_digest
+    }
+
+    pub fn extends(&self, previous: &Self) -> Result<(), PolicyHistoryError> {
+        if self.policy_key != previous.policy_key {
+            return Err(PolicyHistoryError::HistoryKeyMismatch {
+                expected: previous.policy_key.clone(),
+                actual: self.policy_key.clone(),
+            });
+        }
+        if self.major != previous.major {
+            return Err(PolicyHistoryError::HistoryMajorMismatch {
+                expected: previous.major,
+                actual: self.major,
+            });
+        }
+        if self.max_minor < previous.max_minor {
+            return Err(PolicyHistoryError::HistoryTruncated {
+                previous_max_minor: previous.max_minor,
+                max_minor: self.max_minor,
+            });
+        }
+        for (minor, (actual, expected)) in self
+            .compatible_minor_digests
+            .iter()
+            .zip(&previous.compatible_minor_digests)
+            .enumerate()
+        {
+            if actual != expected {
+                return Err(PolicyHistoryError::EarlierDigestChanged {
+                    minor: u16::try_from(minor).expect("validated policy history length"),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Why a lowercase ASCII dotted identifier was rejected.
+///
+/// Segments use lowercase letters, digits, and underscores, matching the
+/// normative catalog's dotted names such as `core.builder.init_field`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CanonicalNameError {
+    Empty,
+    EmptySegment { dot_index: usize },
+    InvalidByte { index: usize, byte: u8 },
+}
+
+impl fmt::Display for CanonicalNameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid lowercase ASCII dotted canonical name: {self:?}")
+    }
+}
+
+impl std::error::Error for CanonicalNameError {}
+
+/// Why a policy descriptor or compatible-minor history was rejected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicyHistoryError {
+    EmptyDescriptorHistory,
+    DescriptorHistoryTooLong {
+        actual: usize,
+    },
+    DescriptorKeyMismatch {
+        index: usize,
+        expected: PolicyKey,
+        actual: PolicyKey,
+    },
+    DescriptorMajorMismatch {
+        index: usize,
+        expected: u16,
+        actual: u16,
+    },
+    DescriptorMinorMismatch {
+        index: usize,
+        actual: u16,
+    },
+    HistoryLengthMismatch {
+        max_minor: u16,
+        actual: usize,
+    },
+    HistoryKeyMismatch {
+        expected: PolicyKey,
+        actual: PolicyKey,
+    },
+    HistoryMajorMismatch {
+        expected: u16,
+        actual: u16,
+    },
+    HistoryTruncated {
+        previous_max_minor: u16,
+        max_minor: u16,
+    },
+    EarlierDigestChanged {
+        minor: u16,
+    },
+}
+
+impl fmt::Display for PolicyHistoryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid policy compatibility history: {self:?}")
+    }
+}
+
+impl std::error::Error for PolicyHistoryError {}
+
+fn validate_canonical_name(name: &str) -> Result<(), CanonicalNameError> {
+    if name.is_empty() {
+        return Err(CanonicalNameError::Empty);
+    }
+    let bytes = name.as_bytes();
+    for (index, &byte) in bytes.iter().enumerate() {
+        match byte {
+            b'.' if index == 0 || bytes[index - 1] == b'.' => {
+                return Err(CanonicalNameError::EmptySegment { dot_index: index });
+            }
+            b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' => {}
+            _ => return Err(CanonicalNameError::InvalidByte { index, byte }),
+        }
+    }
+    if bytes.last() == Some(&b'.') {
+        return Err(CanonicalNameError::EmptySegment {
+            dot_index: bytes.len() - 1,
+        });
+    }
+    Ok(())
+}
 
 /// Stable index in a module-local constant address space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

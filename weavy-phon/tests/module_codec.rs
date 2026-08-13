@@ -256,19 +256,19 @@ fn malformed_modules_are_rejected() {
     bad_offset[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
     assert!(matches!(
         load::<TestCodec>(&bad_offset),
-        Err(CodecError::SectionOutOfBounds { .. }) | Err(CodecError::IntegrityMismatch { .. })
+        Err(CodecError::MalformedHeader) | Err(CodecError::IntegrityMismatch { .. })
     ));
     let mut bad_alignment = bytes.clone();
     bad_alignment[40..44].copy_from_slice(&3u32.to_le_bytes());
     assert!(matches!(
         load::<TestCodec>(&bad_alignment),
-        Err(CodecError::InvalidAlignment { .. }) | Err(CodecError::IntegrityMismatch { .. })
+        Err(CodecError::MalformedHeader) | Err(CodecError::IntegrityMismatch { .. })
     ));
     let mut unknown_required = bytes;
     unknown_required[44..48].copy_from_slice(&u32::MAX.to_le_bytes());
     assert!(matches!(
         load::<TestCodec>(&unknown_required),
-        Err(CodecError::UnknownRequiredSection { .. }) | Err(CodecError::IntegrityMismatch { .. })
+        Err(CodecError::MalformedHeader) | Err(CodecError::IntegrityMismatch { .. })
     ));
 }
 
