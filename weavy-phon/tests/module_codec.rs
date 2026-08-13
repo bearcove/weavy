@@ -10,7 +10,10 @@ use weavy::module::{
     StorageProfile, WeavyModule,
 };
 use weavy::{BlockRef, DenseLowered};
-use weavy_phon::{CodecError, IntrinsicCodec, inspect, load, load_borrowed, save};
+use weavy_phon::{
+    CodecError, ContainerLimits, ImageId, IntrinsicCodec, PayloadIntegrityTag, inspect,
+    inspect_structure, load, load_borrowed, save,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TestIntrinsic {
@@ -130,7 +133,7 @@ fn fixture() -> WeavyModule<TestIntrinsic> {
 fn weavy_bytes_round_trip_deterministically() {
     let module = fixture();
     let first = save::<TestCodec>(&module).expect("save");
-    let loaded = load::<TestCodec>(&first).expect("load");
+    let loaded = load::<TestCodec>(&first, ContainerLimits::default()).expect("load");
     assert_eq!(loaded, module);
     assert_eq!(loaded.constant_ranges(), module.constant_ranges());
     assert_eq!(save::<TestCodec>(&loaded).expect("save again"), first);
@@ -169,25 +172,27 @@ fn large_constant_round_trips_deterministically() {
     ]);
 
     let first = save::<TestCodec>(&module).expect("save");
-    let borrowed = load_borrowed::<TestCodec>(&first).expect("borrowed load");
+    let borrowed =
+        load_borrowed::<TestCodec>(&first, ContainerLimits::default()).expect("borrowed load");
     assert_eq!(
         borrowed.constants()[0].bytes(),
         module.constants()[0].bytes()
     );
-    let owned = load::<TestCodec>(&first).expect("owned load");
+    let owned = load::<TestCodec>(&first, ContainerLimits::default()).expect("owned load");
     assert_eq!(save::<TestCodec>(&owned).expect("save again"), first);
 }
 
 #[test]
 fn borrowed_load_keeps_aligned_range_in_module_bytes() {
     let first = save::<TestCodec>(&fixture()).expect("save");
-    let report = inspect(&first).expect("inspect");
+    let report = inspect(&first, ContainerLimits::default()).expect("inspect");
     let section = report
         .sections
         .iter()
         .find(|section| section.name == "constant_range.0")
         .expect("range section");
-    let borrowed = load_borrowed::<TestCodec>(&first).expect("borrowed load");
+    let borrowed =
+        load_borrowed::<TestCodec>(&first, ContainerLimits::default()).expect("borrowed load");
     borrowed
         .admit(&ModuleVerifier::new([DialectRequirement::new(
             "test", 1, 0,
@@ -216,7 +221,7 @@ fn borrowed_load_keeps_aligned_range_in_module_bytes() {
 #[test]
 fn inspect_reports_discoverable_module_facts() {
     let bytes = save::<TestCodec>(&fixture()).expect("save");
-    let report = inspect(&bytes).expect("inspect");
+    let report = inspect(&bytes, ContainerLimits::default()).expect("inspect");
     assert_eq!(report.module_name, "codec.fixture");
     assert_eq!(report.program_op_count, 3);
     assert_eq!(report.block_count, 1);
@@ -239,35 +244,138 @@ fn inspect_reports_discoverable_module_facts() {
 }
 
 #[test]
+fn saved_image_reports_distinct_physical_identities() {
+    let bytes = save::<TestCodec>(&fixture()).expect("save");
+    let expected_payload_tag = blake3::hash(&bytes[64..]);
+    let expected_image_id = blake3::hash(&bytes);
+
+    let report = inspect(&bytes, ContainerLimits::default()).expect("inspect");
+    assert_eq!(
+        report.payload_integrity_tag,
+        PayloadIntegrityTag::from_bytes(
+            expected_payload_tag.as_bytes()[..16]
+                .try_into()
+                .expect("tag length"),
+        )
+    );
+    assert_eq!(
+        report.image_id,
+        ImageId::from_bytes(*expected_image_id.as_bytes())
+    );
+    assert_eq!(report.payload_integrity_tag.as_bytes(), &bytes[48..64]);
+
+    let mut with_trailing_byte = bytes.clone();
+    with_trailing_byte.push(0);
+    assert!(matches!(
+        inspect_structure(&with_trailing_byte, ContainerLimits::default()),
+        Err(CodecError::Truncated { needed, actual })
+            if needed == bytes.len() && actual == with_trailing_byte.len()
+    ));
+}
+
+#[test]
+fn image_id_covers_header_while_payload_tag_does_not() {
+    let bytes = save::<TestCodec>(&fixture()).expect("save");
+    let original =
+        inspect_structure(&bytes, ContainerLimits::default()).expect("structural inspection");
+
+    let mut changed_header = bytes.clone();
+    changed_header[13] = 1;
+
+    let changed_image_id = ImageId::from_bytes(*blake3::hash(&changed_header).as_bytes());
+    let changed_payload_tag = PayloadIntegrityTag::from_bytes(
+        blake3::hash(&changed_header[64..]).as_bytes()[..16]
+            .try_into()
+            .expect("tag length"),
+    );
+    assert_eq!(changed_payload_tag, original.payload_integrity_tag);
+    assert_ne!(changed_image_id, original.image_id);
+    assert!(matches!(
+        inspect_structure(&changed_header, ContainerLimits::default()),
+        Err(CodecError::MalformedHeader)
+    ));
+}
+
+#[test]
+fn payload_changes_invalidate_the_integrity_tag() {
+    let mut bytes = save::<TestCodec>(&fixture()).expect("save");
+    let original_tag = inspect_structure(&bytes, ContainerLimits::default())
+        .expect("structural inspection")
+        .payload_integrity_tag;
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x80;
+
+    let actual = PayloadIntegrityTag::from_bytes(
+        blake3::hash(&bytes[64..]).as_bytes()[..16]
+            .try_into()
+            .expect("tag length"),
+    );
+    assert_ne!(actual, original_tag);
+    assert!(matches!(
+        inspect_structure(&bytes, ContainerLimits::default()),
+        Err(CodecError::IntegrityMismatch { .. })
+    ));
+}
+
+#[test]
+fn structural_inspection_does_not_decode_semantic_payloads() {
+    let mut bytes = save::<TestCodec>(&fixture()).expect("save");
+    let report = inspect(&bytes, ContainerLimits::default()).expect("semantic inspection");
+    let manifest = report
+        .sections
+        .iter()
+        .find(|section| section.name == "manifest")
+        .expect("manifest section");
+    bytes[manifest.offset as usize] ^= 0x80;
+    rehash(&mut bytes);
+
+    let structural =
+        inspect_structure(&bytes, ContainerLimits::default()).expect("structural inspection");
+    assert_eq!(structural.sections, report.sections);
+    assert_eq!(
+        structural.image_id,
+        ImageId::from_bytes(*blake3::hash(&bytes).as_bytes())
+    );
+    assert!(
+        inspect(&bytes, ContainerLimits::default()).is_err(),
+        "semantic inspection accepted payload"
+    );
+    assert!(
+        load::<TestCodec>(&bytes, ContainerLimits::default()).is_err(),
+        "structural inspection conferred admission authority"
+    );
+}
+
+#[test]
 fn malformed_modules_are_rejected() {
     let bytes = save::<TestCodec>(&fixture()).expect("save");
     let mut corrupted = bytes.clone();
     let last = corrupted.len() - 1;
     corrupted[last] ^= 0x80;
     assert!(matches!(
-        load::<TestCodec>(&corrupted),
+        load::<TestCodec>(&corrupted, ContainerLimits::default()),
         Err(CodecError::IntegrityMismatch { .. })
     ));
     assert!(matches!(
-        load::<TestCodec>(&bytes[..bytes.len() - 1]),
+        load::<TestCodec>(&bytes[..bytes.len() - 1], ContainerLimits::default()),
         Err(CodecError::Truncated { .. })
     ));
     let mut bad_offset = bytes.clone();
     bad_offset[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
     assert!(matches!(
-        load::<TestCodec>(&bad_offset),
+        load::<TestCodec>(&bad_offset, ContainerLimits::default()),
         Err(CodecError::MalformedHeader) | Err(CodecError::IntegrityMismatch { .. })
     ));
     let mut bad_alignment = bytes.clone();
     bad_alignment[40..44].copy_from_slice(&3u32.to_le_bytes());
     assert!(matches!(
-        load::<TestCodec>(&bad_alignment),
+        load::<TestCodec>(&bad_alignment, ContainerLimits::default()),
         Err(CodecError::MalformedHeader) | Err(CodecError::IntegrityMismatch { .. })
     ));
     let mut unknown_required = bytes;
     unknown_required[44..48].copy_from_slice(&u32::MAX.to_le_bytes());
     assert!(matches!(
-        load::<TestCodec>(&unknown_required),
+        load::<TestCodec>(&unknown_required, ContainerLimits::default()),
         Err(CodecError::MalformedHeader) | Err(CodecError::IntegrityMismatch { .. })
     ));
 }
@@ -280,7 +388,7 @@ fn rehash(bytes: &mut [u8]) {
 #[test]
 fn borrowed_ranges_reject_bad_schema_bounds_alignment_and_count() {
     let bytes = save::<TestCodec>(&fixture()).expect("save");
-    let report = inspect(&bytes).expect("inspect");
+    let report = inspect(&bytes, ContainerLimits::default()).expect("inspect");
     let section = report
         .sections
         .iter()
@@ -291,14 +399,14 @@ fn borrowed_ranges_reject_bad_schema_bounds_alignment_and_count() {
     corrupted[section.offset as usize + 16] ^= 1;
     rehash(&mut corrupted);
     assert!(matches!(
-        load_borrowed::<TestCodec>(&corrupted),
+        load_borrowed::<TestCodec>(&corrupted, ContainerLimits::default()),
         Err(CodecError::Aligned(_))
     ));
 
     let mut truncated = bytes.clone();
     truncated.truncate(truncated.len() - 1);
     assert!(matches!(
-        load_borrowed::<TestCodec>(&truncated),
+        load_borrowed::<TestCodec>(&truncated, ContainerLimits::default()),
         Err(CodecError::Truncated { .. })
     ));
 
@@ -307,7 +415,7 @@ fn borrowed_ranges_reject_bad_schema_bounds_alignment_and_count() {
     bad_alignment[offset + 24..offset + 32].copy_from_slice(&65u64.to_le_bytes());
     rehash(&mut bad_alignment);
     assert!(matches!(
-        load_borrowed::<TestCodec>(&bad_alignment),
+        load_borrowed::<TestCodec>(&bad_alignment, ContainerLimits::default()),
         Err(CodecError::Aligned(_))
     ));
 }
@@ -339,7 +447,8 @@ fn borrowed_dense_range_keeps_fixed_rows_in_module_bytes() {
         ConstantRange::new(schemas, 1, StorageProfile::DenseAligned, 2, 4, payload).expect("range"),
     ]);
     let bytes = save::<TestCodec>(&module).expect("save");
-    let borrowed = load_borrowed::<TestCodec>(&bytes).expect("borrowed load");
+    let borrowed =
+        load_borrowed::<TestCodec>(&bytes, ContainerLimits::default()).expect("borrowed load");
     let range = borrowed.dense_range(0).expect("dense range");
     assert_eq!(range.row(1).expect("second row"), &[2, 0, 0, 0]);
     assert_eq!(

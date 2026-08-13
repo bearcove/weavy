@@ -351,6 +351,98 @@ impl PolicyVersion {
     }
 }
 
+/// Immutable semantic authority available to one runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeSemanticSupport {
+    feature_support: FeatureSupport,
+    policy_versions: Vec<PolicyVersion>,
+}
+
+impl RuntimeSemanticSupport {
+    pub fn new(
+        feature_support: FeatureSupport,
+        policy_versions: impl IntoIterator<Item = PolicyVersion>,
+    ) -> Result<Self, RuntimeSemanticSupportError> {
+        let mut policy_versions = policy_versions.into_iter().collect::<Vec<_>>();
+        policy_versions.sort_unstable_by(|left, right| {
+            left.policy_key
+                .cmp(&right.policy_key)
+                .then_with(|| left.major.cmp(&right.major))
+                .then_with(|| left.max_minor.cmp(&right.max_minor))
+                .then_with(|| {
+                    left.compatible_minor_digests
+                        .cmp(&right.compatible_minor_digests)
+                })
+        });
+
+        for (first_index, adjacent) in policy_versions.windows(2).enumerate() {
+            let first = &adjacent[0];
+            let second = &adjacent[1];
+            if first.policy_key == second.policy_key && first.major == second.major {
+                return Err(RuntimeSemanticSupportError::DuplicatePolicyMajor {
+                    policy_key: first.policy_key.clone(),
+                    major: first.major,
+                    first_index,
+                    second_index: first_index + 1,
+                });
+            }
+        }
+
+        Ok(Self {
+            feature_support,
+            policy_versions,
+        })
+    }
+
+    #[must_use]
+    pub const fn feature_support(&self) -> &FeatureSupport {
+        &self.feature_support
+    }
+
+    #[must_use]
+    pub fn policy_versions(&self) -> &[PolicyVersion] {
+        &self.policy_versions
+    }
+
+    #[must_use]
+    pub fn supports_feature(&self, required: &FeatureRequirement) -> bool {
+        self.feature_support.supports(required)
+    }
+
+    #[must_use]
+    pub fn supports_policy(&self, required: &PolicyRequirement) -> bool {
+        self.policy_versions
+            .binary_search_by(|version| {
+                version
+                    .policy_key
+                    .cmp(&required.policy_key)
+                    .then_with(|| version.major.cmp(&required.major))
+            })
+            .is_ok_and(|index| self.policy_versions[index].is_compatible_with(required))
+    }
+}
+
+/// Why immutable runtime semantic authority was rejected after canonical sorting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeSemanticSupportError {
+    /// Two sorted records claimed authority for the same policy key and major.
+    /// Indices address the canonical [`RuntimeSemanticSupport::policy_versions`] order.
+    DuplicatePolicyMajor {
+        policy_key: PolicyKey,
+        major: u16,
+        first_index: usize,
+        second_index: usize,
+    },
+}
+
+impl fmt::Display for RuntimeSemanticSupportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid runtime semantic support: {self:?}")
+    }
+}
+
+impl std::error::Error for RuntimeSemanticSupportError {}
+
 /// Why a lowercase ASCII dotted identifier was rejected.
 ///
 /// Segments use lowercase letters, digits, and underscores, matching the

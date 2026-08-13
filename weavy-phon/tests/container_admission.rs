@@ -7,7 +7,10 @@ use weavy::module::{
     ModuleManifest, StorageProfile, WeavyModule,
 };
 use weavy::{BlockRef, DenseLowered};
-use weavy_phon::{CodecError, IntrinsicCodec, inspect, load, load_borrowed, save};
+use weavy_phon::{
+    CodecError, ContainerLimitKind, ContainerLimits, IntrinsicCodec, inspect, inspect_structure,
+    load, load_borrowed, save,
+};
 
 const SECTION_MANIFEST: u32 = 2;
 const SECTION_SCHEMAS: u32 = 3;
@@ -168,15 +171,245 @@ fn entry(bytes: &[u8], kind: u32) -> EntryOffsets {
 }
 
 fn assert_all_entry_points_reject(bytes: &[u8]) {
+    let limits = ContainerLimits::default();
     assert!(
-        load::<TestCodec>(bytes).is_err(),
+        load::<TestCodec>(bytes, limits).is_err(),
         "owned load accepted image"
     );
     assert!(
-        load_borrowed::<TestCodec>(bytes).is_err(),
+        load_borrowed::<TestCodec>(bytes, limits).is_err(),
         "borrowed load accepted image"
     );
-    assert!(inspect(bytes).is_err(), "inspection accepted image");
+    assert!(inspect(bytes, limits).is_err(), "inspection accepted image");
+}
+
+fn assert_limit_error(
+    result: Result<(), CodecError>,
+    kind: ContainerLimitKind,
+    configured: usize,
+    actual: usize,
+) {
+    assert!(matches!(
+        result,
+        Err(CodecError::ContainerLimitExceeded {
+            kind: actual_kind,
+            configured: actual_configured,
+            actual: actual_value,
+        }) if actual_kind == kind
+            && actual_configured == configured
+            && actual_value == actual
+    ));
+}
+
+fn assert_all_entry_points_reject_with_limits(
+    bytes: &[u8],
+    limits: ContainerLimits,
+    kind: ContainerLimitKind,
+    configured: usize,
+    actual: usize,
+) {
+    assert_limit_error(
+        load::<TestCodec>(bytes, limits).map(|_| ()),
+        kind,
+        configured,
+        actual,
+    );
+    assert_limit_error(
+        load_borrowed::<TestCodec>(bytes, limits).map(|_| ()),
+        kind,
+        configured,
+        actual,
+    );
+    assert_limit_error(inspect(bytes, limits).map(|_| ()), kind, configured, actual);
+    assert_limit_error(
+        inspect_structure(bytes, limits).map(|_| ()),
+        kind,
+        configured,
+        actual,
+    );
+}
+
+type LimitedEntryPoint = fn(&[u8], ContainerLimits) -> Result<(), CodecError>;
+
+fn owned_entry(bytes: &[u8], limits: ContainerLimits) -> Result<(), CodecError> {
+    load::<TestCodec>(bytes, limits).map(|_| ())
+}
+
+fn borrowed_entry(bytes: &[u8], limits: ContainerLimits) -> Result<(), CodecError> {
+    load_borrowed::<TestCodec>(bytes, limits).map(|_| ())
+}
+
+fn semantic_entry(bytes: &[u8], limits: ContainerLimits) -> Result<(), CodecError> {
+    inspect(bytes, limits).map(|_| ())
+}
+
+fn structural_entry(bytes: &[u8], limits: ContainerLimits) -> Result<(), CodecError> {
+    inspect_structure(bytes, limits).map(|_| ())
+}
+
+fn limit_actual(
+    result: Result<(), CodecError>,
+    kind: ContainerLimitKind,
+    configured: usize,
+) -> usize {
+    match result {
+        Err(CodecError::ContainerLimitExceeded {
+            kind: actual_kind,
+            configured: actual_configured,
+            actual,
+        }) if actual_kind == kind && actual_configured == configured => actual,
+        other => panic!("expected {kind:?} limit {configured}, got {other:?}"),
+    }
+}
+
+fn assert_cumulative_byte_limit(
+    bytes: &[u8],
+    kind: ContainerLimitKind,
+    set_limit: fn(ContainerLimits, usize) -> ContainerLimits,
+) {
+    for (name, entry) in [
+        ("owned", owned_entry as LimitedEntryPoint),
+        ("borrowed", borrowed_entry as LimitedEntryPoint),
+        ("semantic", semantic_entry as LimitedEntryPoint),
+        ("structural", structural_entry as LimitedEntryPoint),
+    ] {
+        let first_actual = limit_actual(
+            entry(bytes, set_limit(ContainerLimits::DEFAULT, 0)),
+            kind,
+            0,
+        );
+        let later_actual = limit_actual(
+            entry(bytes, set_limit(ContainerLimits::DEFAULT, first_actual)),
+            kind,
+            first_actual,
+        );
+        assert!(
+            later_actual > first_actual,
+            "{name} did not accumulate {kind:?} across allocations"
+        );
+    }
+}
+
+#[test]
+fn decoded_byte_limit_is_cumulative_across_entry_points() {
+    let bytes = valid_bytes();
+    for (name, entry) in [
+        ("owned", owned_entry as LimitedEntryPoint),
+        ("borrowed", borrowed_entry as LimitedEntryPoint),
+        ("semantic", semantic_entry as LimitedEntryPoint),
+        ("structural", structural_entry as LimitedEntryPoint),
+    ] {
+        let mut configured = 0;
+        let mut failures = 0;
+        loop {
+            match entry(
+                &bytes,
+                ContainerLimits::DEFAULT.with_max_decoded_bytes(configured),
+            ) {
+                Ok(()) => break,
+                Err(CodecError::ContainerLimitExceeded {
+                    kind: ContainerLimitKind::DecodedBytes,
+                    configured: actual_configured,
+                    actual,
+                }) if actual_configured == configured && actual > configured => {
+                    configured = actual;
+                    failures += 1;
+                }
+                other => panic!("{name} returned unexpected decoded-byte result: {other:?}"),
+            }
+        }
+        assert!(failures > 0, "{name} did not enforce decoded bytes");
+    }
+}
+
+#[test]
+fn retained_byte_limit_is_cumulative_across_entry_points() {
+    assert_cumulative_byte_limit(
+        &valid_bytes(),
+        ContainerLimitKind::RetainedBytes,
+        ContainerLimits::with_max_retained_bytes,
+    );
+}
+
+#[test]
+fn tiny_image_limit_rejects_all_entry_points() {
+    let bytes = valid_bytes();
+    let configured = bytes.len() - 1;
+    assert_all_entry_points_reject_with_limits(
+        &bytes,
+        ContainerLimits::DEFAULT.with_max_image_bytes(configured),
+        ContainerLimitKind::ImageBytes,
+        configured,
+        bytes.len(),
+    );
+}
+
+#[test]
+fn tiny_directory_limit_rejects_all_entry_points() {
+    let bytes = valid_bytes();
+    let actual = read_u64(&bytes, 32) as usize;
+    let configured = actual - 1;
+    assert_all_entry_points_reject_with_limits(
+        &bytes,
+        ContainerLimits::DEFAULT.with_max_directory_bytes(configured),
+        ContainerLimitKind::DirectoryBytes,
+        configured,
+        actual,
+    );
+}
+
+#[test]
+fn tiny_section_limit_rejects_all_entry_points() {
+    let bytes = valid_bytes();
+    let actual = directory_entries(&bytes).len();
+    let configured = actual - 1;
+    assert_all_entry_points_reject_with_limits(
+        &bytes,
+        ContainerLimits::DEFAULT.with_max_sections(configured),
+        ContainerLimitKind::Sections,
+        configured,
+        actual,
+    );
+}
+
+#[test]
+fn tiny_schema_limit_rejects_semantic_entry_points() {
+    let bytes = valid_bytes();
+    let schemas = entry(&bytes, SECTION_SCHEMAS);
+    let schemas_offset = read_u64(&bytes, schemas.offset_at) as usize;
+    let actual = read_u32(&bytes, schemas_offset) as usize;
+    let configured = actual - 1;
+    let limits = ContainerLimits::DEFAULT.with_max_schemas(configured);
+
+    assert_limit_error(
+        load::<TestCodec>(&bytes, limits).map(|_| ()),
+        ContainerLimitKind::Schemas,
+        configured,
+        actual,
+    );
+    assert_limit_error(
+        load_borrowed::<TestCodec>(&bytes, limits).map(|_| ()),
+        ContainerLimitKind::Schemas,
+        configured,
+        actual,
+    );
+    assert_limit_error(
+        inspect(&bytes, limits).map(|_| ()),
+        ContainerLimitKind::Schemas,
+        configured,
+        actual,
+    );
+    inspect_structure(&bytes, limits).expect("structural inspect skips schema decode");
+}
+
+#[test]
+fn explicit_default_limits_load_current_fixture() {
+    let bytes = valid_bytes();
+    let limits = ContainerLimits::default();
+    load::<TestCodec>(&bytes, limits).expect("owned load with default limits");
+    load_borrowed::<TestCodec>(&bytes, limits).expect("borrowed load with default limits");
+    inspect(&bytes, limits).expect("semantic inspect with default limits");
+    inspect_structure(&bytes, limits).expect("structural inspect with default limits");
 }
 
 fn rehash(bytes: &mut [u8]) {

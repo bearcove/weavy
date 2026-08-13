@@ -21,8 +21,9 @@ pub use exec::{
     StructuralResult, TaskFault,
 };
 pub use module::{
-    CanonicalNameError, FeatureId, FeatureNamespace, PolicyDescriptor, PolicyHistoryError,
-    PolicyKey, PolicyRequirement, PolicyVersion,
+    CanonicalNameError, FeatureDescriptor, FeatureId, FeatureNamespace, FeatureRequirement,
+    FeatureSupport, FeatureSupportError, PolicyDescriptor, PolicyHistoryError, PolicyKey,
+    PolicyRequirement, PolicyVersion, RuntimeSemanticSupport, RuntimeSemanticSupportError,
 };
 pub use task::StructuralFieldSource;
 pub use verified::{

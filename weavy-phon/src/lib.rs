@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use facet_value::{VArray, VObject, VString, Value};
+use facet_value::Value;
 use phon_schema::{
     Field, Primitive, Schema, SchemaId, SchemaKind, SchemaRef, primitive_id, resolve_ids,
     schema_from_bytes, schema_to_bytes,
@@ -34,10 +34,284 @@ const PROGRAM_SCHEMA_ID: u64 = 0x0bcb_92f4_3d1a_308a;
 const CONSTANT_DIRECTORY_SCHEMA_ID: u64 = 0xd87c_d9d9_3b41_e5aa;
 const DIRECTORY_SECTION_SCHEMA_ID: u64 = 0x27e8_8229_2860_ab54;
 const DIRECTORY_SCHEMA_ID: u64 = 0xcf54_d756_8f59_3290;
-const MAX_DIRECTORY_BYTES: usize = 16 * 1024 * 1024;
-const MAX_SECTION_COUNT: usize = 1 << 16;
+const DEFAULT_MAX_IMAGE_BYTES: usize = 1 << 30;
+const DEFAULT_MAX_DIRECTORY_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_MAX_SECTIONS: usize = 1 << 16;
+const DEFAULT_MAX_SCHEMAS: usize = 1 << 16;
+const DEFAULT_MAX_MANIFEST_DIALECTS: usize = 1 << 16;
+const DEFAULT_MAX_MANIFEST_ROOTS: usize = 1 << 20;
+const DEFAULT_MAX_PROGRAM_BLOCKS: usize = 1 << 20;
+const DEFAULT_MAX_PROGRAM_OPS: usize = 1 << 24;
+const DEFAULT_MAX_SCALAR_SEGMENTS: usize = 1 << 20;
+const DEFAULT_MAX_CONSTANTS: usize = 1 << 20;
+const DEFAULT_MAX_DECODED_BYTES: usize = 256 * 1024 * 1024;
+const DEFAULT_MAX_RETAINED_BYTES: usize = 256 * 1024 * 1024;
 const MIN_DIRECTORY_ENTRY_BYTES: usize = 73;
 
+/// Caller-selected ceilings for phase-0 container parsing and byte-derived collections.
+///
+/// These limits bound physical decoding only. They are not the semantic admission policy
+/// described by Weavy's broader `AdmissionLimits` design.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContainerLimits {
+    max_image_bytes: usize,
+    max_directory_bytes: usize,
+    max_sections: usize,
+    max_schemas: usize,
+    max_manifest_dialects: usize,
+    max_manifest_roots: usize,
+    max_program_blocks: usize,
+    max_program_ops: usize,
+    max_scalar_segments: usize,
+    max_constants: usize,
+    max_decoded_bytes: usize,
+    max_retained_bytes: usize,
+}
+
+impl ContainerLimits {
+    /// Default phase-0 ceilings for callers that do not need tighter bounds.
+    pub const DEFAULT: Self = Self {
+        max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+        max_directory_bytes: DEFAULT_MAX_DIRECTORY_BYTES,
+        max_sections: DEFAULT_MAX_SECTIONS,
+        max_schemas: DEFAULT_MAX_SCHEMAS,
+        max_manifest_dialects: DEFAULT_MAX_MANIFEST_DIALECTS,
+        max_manifest_roots: DEFAULT_MAX_MANIFEST_ROOTS,
+        max_program_blocks: DEFAULT_MAX_PROGRAM_BLOCKS,
+        max_program_ops: DEFAULT_MAX_PROGRAM_OPS,
+        max_scalar_segments: DEFAULT_MAX_SCALAR_SEGMENTS,
+        max_constants: DEFAULT_MAX_CONSTANTS,
+        max_decoded_bytes: DEFAULT_MAX_DECODED_BYTES,
+        max_retained_bytes: DEFAULT_MAX_RETAINED_BYTES,
+    };
+
+    #[must_use]
+    pub const fn with_max_image_bytes(mut self, max_image_bytes: usize) -> Self {
+        self.max_image_bytes = max_image_bytes;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_directory_bytes(mut self, max_directory_bytes: usize) -> Self {
+        self.max_directory_bytes = max_directory_bytes;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_sections(mut self, max_sections: usize) -> Self {
+        self.max_sections = max_sections;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_schemas(mut self, max_schemas: usize) -> Self {
+        self.max_schemas = max_schemas;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_manifest_dialects(mut self, max_manifest_dialects: usize) -> Self {
+        self.max_manifest_dialects = max_manifest_dialects;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_manifest_roots(mut self, max_manifest_roots: usize) -> Self {
+        self.max_manifest_roots = max_manifest_roots;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_program_blocks(mut self, max_program_blocks: usize) -> Self {
+        self.max_program_blocks = max_program_blocks;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_program_ops(mut self, max_program_ops: usize) -> Self {
+        self.max_program_ops = max_program_ops;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_scalar_segments(mut self, max_scalar_segments: usize) -> Self {
+        self.max_scalar_segments = max_scalar_segments;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_constants(mut self, max_constants: usize) -> Self {
+        self.max_constants = max_constants;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_decoded_bytes(mut self, max_decoded_bytes: usize) -> Self {
+        self.max_decoded_bytes = max_decoded_bytes;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_retained_bytes(mut self, max_retained_bytes: usize) -> Self {
+        self.max_retained_bytes = max_retained_bytes;
+        self
+    }
+}
+
+impl Default for ContainerLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The specific phase-0 ceiling exceeded while parsing an image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum ContainerLimitKind {
+    ImageBytes,
+    DirectoryBytes,
+    Sections,
+    Schemas,
+    ManifestDialects,
+    ManifestRoots,
+    ProgramBlocks,
+    ProgramOps,
+    ScalarSegments,
+    Constants,
+    DecodedBytes,
+    RetainedBytes,
+}
+
+fn enforce_limit(
+    kind: ContainerLimitKind,
+    configured: usize,
+    actual: usize,
+) -> Result<(), CodecError> {
+    if actual > configured {
+        Err(CodecError::ContainerLimitExceeded {
+            kind,
+            configured,
+            actual,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+struct ByteBudgets {
+    limits: ContainerLimits,
+    decoded: usize,
+    retained: usize,
+}
+
+impl ByteBudgets {
+    const fn new(limits: ContainerLimits) -> Self {
+        Self {
+            limits,
+            decoded: 0,
+            retained: 0,
+        }
+    }
+
+    fn decoded(&mut self, bytes: usize) -> Result<(), CodecError> {
+        self.decoded = self
+            .decoded
+            .checked_add(bytes)
+            .ok_or(CodecError::SizeOverflow)?;
+        enforce_limit(
+            ContainerLimitKind::DecodedBytes,
+            self.limits.max_decoded_bytes,
+            self.decoded,
+        )
+    }
+
+    fn retained(&mut self, bytes: usize) -> Result<(), CodecError> {
+        self.retained = self
+            .retained
+            .checked_add(bytes)
+            .ok_or(CodecError::SizeOverflow)?;
+        enforce_limit(
+            ContainerLimitKind::RetainedBytes,
+            self.limits.max_retained_bytes,
+            self.retained,
+        )
+    }
+
+    fn reserve<T>(&mut self, count: usize) -> Result<Vec<T>, CodecError> {
+        self.retained(
+            count
+                .checked_mul(core::mem::size_of::<T>())
+                .ok_or(CodecError::SizeOverflow)?,
+        )?;
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(count)
+            .map_err(|_| CodecError::AdmissionLimitExceeded)?;
+        Ok(values)
+    }
+
+    fn copy_bytes(&mut self, bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
+        self.retained(bytes.len())?;
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| CodecError::AdmissionLimitExceeded)?;
+        owned.extend_from_slice(bytes);
+        Ok(owned)
+    }
+
+    fn copy_string(&mut self, value: &str) -> Result<String, CodecError> {
+        self.retained(value.len())?;
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(value.len())
+            .map_err(|_| CodecError::AdmissionLimitExceeded)?;
+        owned.push_str(value);
+        Ok(owned)
+    }
+}
+
+/// Truncated payload-integrity digest stored in the format-1.0 header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PayloadIntegrityTag([u8; 16]);
+
+impl PayloadIntegrityTag {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; 16] {
+        self.0
+    }
+}
+
+/// Full BLAKE3 digest of the exact complete received module image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImageId([u8; 32]);
+
+impl ImageId {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
 /// Intrinsic-specific durable byte encoding.
 pub trait IntrinsicCodec {
     type Intrinsic;
@@ -336,48 +610,61 @@ pub fn save<C: IntrinsicCodec>(module: &WeavyModule<C::Intrinsic>) -> Result<Vec
     Ok(bytes)
 }
 
-pub fn load<C: IntrinsicCodec>(bytes: &[u8]) -> Result<WeavyModule<C::Intrinsic>, CodecError> {
-    let parsed = parse_container(bytes)?;
-    let schemas = decode_schema_bundle(parsed.section(SECTION_SCHEMAS)?)?;
+/// Load an owned module with caller-selected phase-0 container ceilings.
+pub fn load<C: IntrinsicCodec>(
+    bytes: &[u8],
+    limits: ContainerLimits,
+) -> Result<WeavyModule<C::Intrinsic>, CodecError> {
+    let mut budgets = ByteBudgets::new(limits);
+    let parsed = parse_container(bytes, limits, &mut budgets)?;
+    let schemas = decode_schema_bundle(parsed.section(SECTION_SCHEMAS)?, limits, &mut budgets)?;
     let compact_registry = Registry::try_new(schemas.clone()).map_err(CodecError::Phon)?;
     let aligned_registry = AlignedRegistry::try_new(schemas).map_err(CodecError::Phon)?;
-    validate_constant_range_sections(&parsed, &compact_registry, &aligned_registry)?;
-    let manifest = decode_manifest(parsed.section(SECTION_MANIFEST)?)?;
-    let program = decode_program::<C>(parsed.section(SECTION_PROGRAM)?)?;
-    let constants = decode_constants(parsed.section(SECTION_CONSTANTS)?)?;
-    let ranges = decode_constant_ranges(&parsed, &compact_registry)?;
+    validate_constant_range_sections(&parsed, &compact_registry, &aligned_registry, &mut budgets)?;
+    let manifest = decode_manifest(parsed.section(SECTION_MANIFEST)?, limits, &mut budgets)?;
+    let program = decode_program::<C>(parsed.section(SECTION_PROGRAM)?, limits, &mut budgets)?;
+    let constants = decode_constants(parsed.section(SECTION_CONSTANTS)?, limits, &mut budgets)?;
+    let ranges = decode_constant_ranges(&parsed, &compact_registry, &mut budgets)?;
     Ok(WeavyModule::new(manifest, program, constants).with_constant_ranges(ranges))
 }
 
+/// Load a borrowing module with caller-selected phase-0 container ceilings.
 pub fn load_borrowed<C: IntrinsicCodec>(
     bytes: &[u8],
+    limits: ContainerLimits,
 ) -> Result<BorrowedModule<'_, C::Intrinsic>, CodecError> {
-    let parsed = parse_container(bytes)?;
-    let schemas = decode_schema_bundle(parsed.section(SECTION_SCHEMAS)?)?;
+    let mut budgets = ByteBudgets::new(limits);
+    let parsed = parse_container(bytes, limits, &mut budgets)?;
+    let schemas = decode_schema_bundle(parsed.section(SECTION_SCHEMAS)?, limits, &mut budgets)?;
     let compact_registry = Registry::try_new(schemas.clone()).map_err(CodecError::Phon)?;
     let aligned_registry = AlignedRegistry::try_new(schemas).map_err(CodecError::Phon)?;
-    validate_constant_range_sections(&parsed, &compact_registry, &aligned_registry)?;
-    let manifest = decode_manifest(parsed.section(SECTION_MANIFEST)?)?;
-    let program = decode_program::<C>(parsed.section(SECTION_PROGRAM)?)?;
-    let constants = decode_constants(parsed.section(SECTION_CONSTANTS)?)?;
-    let ranges = parsed
+    validate_constant_range_sections(&parsed, &compact_registry, &aligned_registry, &mut budgets)?;
+    let manifest = decode_manifest(parsed.section(SECTION_MANIFEST)?, limits, &mut budgets)?;
+    let program = decode_program::<C>(parsed.section(SECTION_PROGRAM)?, limits, &mut budgets)?;
+    let constants = decode_constants(parsed.section(SECTION_CONSTANTS)?, limits, &mut budgets)?;
+    let range_count = parsed
         .sections
         .iter()
         .filter(|section| section.kind >= SECTION_CONSTANT_RANGE_BASE)
-        .map(|section| {
-            Ok(BorrowedConstantRange {
-                report: ConstantRangeReport {
-                    id: section.kind - SECTION_CONSTANT_RANGE_BASE,
-                    schema_id: SchemaId::from_raw(section.schema_id),
-                    profile: section.profile.ok_or(CodecError::MalformedDirectory)?,
-                    count: section.count,
-                    stride: section.stride,
-                    encoded_len: section.encoded_len,
-                },
-                bytes: parsed.section(section.kind)?,
-            })
-        })
-        .collect::<Result<Vec<_>, CodecError>>()?;
+        .count();
+    let mut ranges = budgets.reserve::<BorrowedConstantRange<'_>>(range_count)?;
+    for section in parsed
+        .sections
+        .iter()
+        .filter(|section| section.kind >= SECTION_CONSTANT_RANGE_BASE)
+    {
+        ranges.push(BorrowedConstantRange {
+            report: ConstantRangeReport {
+                id: section.kind - SECTION_CONSTANT_RANGE_BASE,
+                schema_id: SchemaId::from_raw(section.schema_id),
+                profile: section.profile.ok_or(CodecError::MalformedDirectory)?,
+                count: section.count,
+                stride: section.stride,
+                encoded_len: section.encoded_len,
+            },
+            bytes: parsed.section(section.kind)?,
+        });
+    }
     Ok(BorrowedModule {
         manifest,
         program,
@@ -388,32 +675,49 @@ pub fn load_borrowed<C: IntrinsicCodec>(
     })
 }
 
-pub fn inspect(bytes: &[u8]) -> Result<InspectionReport, CodecError> {
-    let parsed = parse_container(bytes)?;
-    let schemas = decode_schema_bundle(parsed.section(SECTION_SCHEMAS)?)?;
+/// Inspect decoded module facts with caller-selected phase-0 container ceilings.
+///
+/// This report is descriptive only; it does not confer admission authority.
+pub fn inspect(bytes: &[u8], limits: ContainerLimits) -> Result<InspectionReport, CodecError> {
+    let mut budgets = ByteBudgets::new(limits);
+    let parsed = parse_container(bytes, limits, &mut budgets)?;
+    let schemas = decode_schema_bundle(parsed.section(SECTION_SCHEMAS)?, limits, &mut budgets)?;
     let compact_registry = Registry::try_new(schemas.clone()).map_err(CodecError::Phon)?;
     let aligned_registry = AlignedRegistry::try_new(schemas).map_err(CodecError::Phon)?;
-    validate_constant_range_sections(&parsed, &compact_registry, &aligned_registry)?;
-    let manifest = decode_manifest(parsed.section(SECTION_MANIFEST)?)?;
-    let (program_op_count, block_count) = inspect_program(parsed.section(SECTION_PROGRAM)?)?;
-    let constant_count = inspect_constants(parsed.section(SECTION_CONSTANTS)?)?;
-    let constant_ranges = parsed
+    validate_constant_range_sections(&parsed, &compact_registry, &aligned_registry, &mut budgets)?;
+    let manifest = decode_manifest(parsed.section(SECTION_MANIFEST)?, limits, &mut budgets)?;
+    let (program_op_count, block_count) =
+        inspect_program(parsed.section(SECTION_PROGRAM)?, limits, &mut budgets)?;
+    let constant_count =
+        inspect_constants(parsed.section(SECTION_CONSTANTS)?, limits, &mut budgets)?;
+    let range_count = parsed
         .sections
         .iter()
         .filter(|section| section.kind >= SECTION_CONSTANT_RANGE_BASE)
-        .map(|section| ConstantRangeReport {
-            id: section.kind - SECTION_CONSTANT_RANGE_BASE,
-            schema_id: SchemaId::from_raw(section.schema_id),
-            profile: section.profile.expect("range profile validated"),
-            count: section.count,
-            stride: section.stride,
-            encoded_len: section.encoded_len,
-        })
-        .collect();
+        .count();
+    let mut constant_ranges = budgets.reserve::<ConstantRangeReport>(range_count)?;
+    constant_ranges.extend(
+        parsed
+            .sections
+            .iter()
+            .filter(|section| section.kind >= SECTION_CONSTANT_RANGE_BASE)
+            .map(|section| ConstantRangeReport {
+                id: section.kind - SECTION_CONSTANT_RANGE_BASE,
+                schema_id: SchemaId::from_raw(section.schema_id),
+                profile: section.profile.expect("range profile validated"),
+                count: section.count,
+                stride: section.stride,
+                encoded_len: section.encoded_len,
+            }),
+    );
+    let module_name = budgets.copy_string(manifest.name())?;
+    let mut dialects = budgets.reserve::<DialectRequirement>(manifest.dialects().len())?;
+    dialects.extend_from_slice(manifest.dialects());
     Ok(InspectionReport {
-        module_name: manifest.name().to_owned(),
-        executable_identity: parsed.identity,
-        dialects: manifest.dialects().to_vec(),
+        module_name,
+        payload_integrity_tag: parsed.payload_integrity_tag,
+        image_id: parsed.image_id,
+        dialects,
         sections: parsed.sections,
         program_op_count,
         block_count,
@@ -422,6 +726,22 @@ pub fn inspect(bytes: &[u8]) -> Result<InspectionReport, CodecError> {
     })
 }
 
+/// Inspect physical image structure with caller-selected phase-0 container ceilings.
+///
+/// Structural inspection verifies framing and payload integrity but deliberately does not
+/// decode semantic section payloads. Its result carries no semantic or admission authority.
+pub fn inspect_structure(
+    bytes: &[u8],
+    limits: ContainerLimits,
+) -> Result<StructuralInspection, CodecError> {
+    let mut budgets = ByteBudgets::new(limits);
+    let parsed = parse_container(bytes, limits, &mut budgets)?;
+    Ok(StructuralInspection {
+        payload_integrity_tag: parsed.payload_integrity_tag,
+        image_id: parsed.image_id,
+        sections: parsed.sections,
+    })
+}
 struct Parsed<'a> {
     bytes: &'a [u8],
     sections: Vec<SectionReport>,
@@ -440,7 +760,16 @@ impl<'a> Parsed<'a> {
     }
 }
 
-fn parse_container(bytes: &[u8]) -> Result<Parsed<'_>, CodecError> {
+fn parse_container<'a>(
+    bytes: &'a [u8],
+    limits: ContainerLimits,
+    budgets: &mut ByteBudgets,
+) -> Result<Parsed<'a>, CodecError> {
+    enforce_limit(
+        ContainerLimitKind::ImageBytes,
+        limits.max_image_bytes,
+        bytes.len(),
+    )?;
     if bytes.len() < HEADER_SIZE {
         return Err(CodecError::Truncated {
             needed: HEADER_SIZE,
@@ -475,9 +804,11 @@ fn parse_container(bytes: &[u8]) -> Result<Parsed<'_>, CodecError> {
     {
         return Err(CodecError::MalformedHeader);
     }
-    if directory_len > MAX_DIRECTORY_BYTES {
-        return Err(CodecError::AdmissionLimitExceeded);
-    }
+    enforce_limit(
+        ContainerLimitKind::DirectoryBytes,
+        limits.max_directory_bytes,
+        directory_len,
+    )?;
     let directory_end =
         directory_offset
             .checked_add(directory_len)
@@ -499,10 +830,7 @@ fn parse_container(bytes: &[u8]) -> Result<Parsed<'_>, CodecError> {
         return Err(CodecError::IntegrityMismatch { expected, actual });
     }
     let directory_bytes = &bytes[directory_offset..directory_end];
-    let sections = decode_directory(directory_bytes)?;
-    if sections.len() > MAX_SECTION_COUNT {
-        return Err(CodecError::AdmissionLimitExceeded);
-    }
+    let sections = decode_directory(directory_bytes, limits, budgets)?;
     if encode_directory(&sections)? != directory_bytes {
         return Err(CodecError::MalformedDirectory);
     }
@@ -688,107 +1016,199 @@ fn field(name: &str, primitive: Primitive) -> Field {
 }
 
 fn encode_directory(sections: &[SectionReport]) -> Result<Vec<u8>, CodecError> {
-    let (schemas, root) = directory_schemas();
-    let registry = Registry::new(schemas);
-    let mut array = VArray::new();
+    let minimum = 4usize
+        .checked_add(
+            sections
+                .len()
+                .checked_mul(MIN_DIRECTORY_ENTRY_BYTES)
+                .ok_or(CodecError::SizeOverflow)?,
+        )
+        .ok_or(CodecError::SizeOverflow)?;
+    let names = sections.iter().try_fold(0usize, |total, section| {
+        total
+            .checked_add(section.name.len())
+            .ok_or(CodecError::SizeOverflow)
+    })?;
+    let mut out = Vec::new();
+    out.try_reserve(
+        minimum
+            .checked_add(names)
+            .and_then(|bytes| bytes.checked_add(sections.len() * 32))
+            .ok_or(CodecError::SizeOverflow)?,
+    )
+    .map_err(|_| CodecError::AdmissionLimitExceeded)?;
+    put_u32(
+        &mut out,
+        u32::try_from(sections.len()).map_err(|_| CodecError::SizeOverflow)?,
+    );
     for section in sections {
-        let mut object = VObject::new();
-        object.insert(VString::new("name"), Value::from(section.name.as_str()));
-        object.insert(VString::new("kind"), Value::from(section.kind));
-        object.insert(VString::new("offset"), Value::from(section.offset));
-        object.insert(
-            VString::new("encoded_len"),
-            Value::from(section.encoded_len),
-        );
-        object.insert(
-            VString::new("decoded_len"),
-            Value::from(section.decoded_len),
-        );
-        object.insert(VString::new("alignment"), Value::from(section.alignment));
-        object.insert(VString::new("schema_id"), Value::from(section.schema_id));
-        object.insert(VString::new("flags"), Value::from(section.flags));
-        object.insert(
-            VString::new("profile"),
-            Value::from(match section.profile {
-                None => 0u8,
-                Some(StorageProfile::Compact) => 1,
-                Some(StorageProfile::Aligned) => 2,
-                Some(StorageProfile::DenseAligned) => 3,
-            }),
-        );
-        object.insert(VString::new("count"), Value::from(section.count));
-        object.insert(VString::new("stride"), Value::from(section.stride));
-        array.push(object);
+        put_directory_string(&mut out, &section.name)?;
+        put_directory_u32(&mut out, section.kind);
+        put_directory_u64(&mut out, section.offset);
+        put_directory_u64(&mut out, section.encoded_len);
+        put_directory_u64(&mut out, section.decoded_len);
+        put_directory_u32(&mut out, section.alignment);
+        put_directory_u64(&mut out, section.schema_id);
+        put_directory_u32(&mut out, section.flags);
+        out.push(match section.profile {
+            None => 0,
+            Some(StorageProfile::Compact) => 1,
+            Some(StorageProfile::Aligned) => 2,
+            Some(StorageProfile::DenseAligned) => 3,
+        });
+        put_directory_u32(&mut out, section.count);
+        put_directory_u32(&mut out, section.stride);
     }
-    compact::to_bytes(&array.into(), root, &registry).map_err(CodecError::Phon)
+    Ok(out)
 }
 
-fn decode_directory(bytes: &[u8]) -> Result<Vec<SectionReport>, CodecError> {
-    if bytes.len() < 4 {
-        return Err(CodecError::MalformedDirectory);
+fn pad_directory(out: &mut Vec<u8>, alignment: usize) {
+    while !out.len().is_multiple_of(alignment) {
+        out.push(0);
     }
-    let encoded_count = read_u32(bytes, 0)? as usize;
+}
+
+fn put_directory_u32(out: &mut Vec<u8>, value: u32) {
+    pad_directory(out, 4);
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put_directory_u64(out: &mut Vec<u8>, value: u64) {
+    pad_directory(out, 8);
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put_directory_string(out: &mut Vec<u8>, value: &str) -> Result<(), CodecError> {
+    put_directory_u32(
+        out,
+        u32::try_from(value.len()).map_err(|_| CodecError::SizeOverflow)?,
+    );
+    out.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn decode_directory(
+    bytes: &[u8],
+    limits: ContainerLimits,
+    budgets: &mut ByteBudgets,
+) -> Result<Vec<SectionReport>, CodecError> {
+    budgets.decoded(bytes.len())?;
+    let mut reader = DirectoryReader::new(bytes);
+    let encoded_count = reader.u32()? as usize;
     let byte_derived_max = bytes.len().saturating_sub(4) / MIN_DIRECTORY_ENTRY_BYTES;
-    if encoded_count > MAX_SECTION_COUNT || encoded_count > byte_derived_max {
+    enforce_limit(
+        ContainerLimitKind::Sections,
+        limits.max_sections,
+        encoded_count,
+    )?;
+    if encoded_count > byte_derived_max {
         return Err(CodecError::AdmissionLimitExceeded);
     }
-    let (schemas, root) = directory_schemas();
-    let registry = Registry::new(schemas);
-    let value = compact::from_bytes(bytes, root, &registry).map_err(CodecError::Phon)?;
-    let array = value.as_array().ok_or(CodecError::MalformedDirectory)?;
-    if array.len() != encoded_count {
-        return Err(CodecError::MalformedDirectory);
-    }
-    let mut sections = Vec::new();
-    sections
-        .try_reserve_exact(encoded_count)
-        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
-    for index in 0..array.len() {
-        let object = array
-            .get(index)
-            .and_then(Value::as_object)
-            .ok_or(CodecError::MalformedDirectory)?;
+    let mut sections = budgets.reserve::<SectionReport>(encoded_count)?;
+    for _ in 0..encoded_count {
+        let name = reader.string(budgets)?;
+        let kind = reader.u32()?;
+        let offset = reader.u64()?;
+        let encoded_len = reader.u64()?;
+        let decoded_len = reader.u64()?;
+        let alignment = reader.u32()?;
+        let schema_id = reader.u64()?;
+        let flags = reader.u32()?;
+        let profile = match reader.u8()? {
+            0 => None,
+            1 => Some(StorageProfile::Compact),
+            2 => Some(StorageProfile::Aligned),
+            3 => Some(StorageProfile::DenseAligned),
+            _ => return Err(CodecError::MalformedDirectory),
+        };
+        let count = reader.u32()?;
+        let stride = reader.u32()?;
         sections.push(SectionReport {
-            name: object_string(object, "name")?,
-            kind: object_u32(object, "kind")?,
-            offset: object_u64(object, "offset")?,
-            encoded_len: object_u64(object, "encoded_len")?,
-            decoded_len: object_u64(object, "decoded_len")?,
-            alignment: object_u32(object, "alignment")?,
-            schema_id: object_u64(object, "schema_id")?,
-            flags: object_u32(object, "flags")?,
-            profile: match object_u32(object, "profile")? {
-                0 => None,
-                1 => Some(StorageProfile::Compact),
-                2 => Some(StorageProfile::Aligned),
-                3 => Some(StorageProfile::DenseAligned),
-                _ => return Err(CodecError::MalformedDirectory),
-            },
-            count: object_u32(object, "count")?,
-            stride: object_u32(object, "stride")?,
+            name,
+            kind,
+            offset,
+            encoded_len,
+            decoded_len,
+            alignment,
+            schema_id,
+            flags,
+            profile,
+            count,
+            stride,
         });
     }
+    reader.finish()?;
     Ok(sections)
 }
-fn object_value<'a>(object: &'a VObject, name: &str) -> Result<&'a Value, CodecError> {
-    object
-        .get(&VString::new(name))
-        .ok_or(CodecError::MalformedDirectory)
+
+struct DirectoryReader<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
 }
-fn object_string(object: &VObject, name: &str) -> Result<String, CodecError> {
-    object_value(object, name)?
-        .as_string()
-        .map(|value| value.as_str().to_owned())
-        .ok_or(CodecError::MalformedDirectory)
-}
-fn object_u64(object: &VObject, name: &str) -> Result<u64, CodecError> {
-    object_value(object, name)?
-        .as_number()
-        .and_then(|value| value.to_u64())
-        .ok_or(CodecError::MalformedDirectory)
-}
-fn object_u32(object: &VObject, name: &str) -> Result<u32, CodecError> {
-    u32::try_from(object_u64(object, name)?).map_err(|_| CodecError::MalformedDirectory)
+
+impl<'a> DirectoryReader<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, cursor: 0 }
+    }
+
+    fn align(&mut self, alignment: usize) -> Result<(), CodecError> {
+        let aligned = align_up(self.cursor, alignment)?;
+        let padding = self
+            .bytes
+            .get(self.cursor..aligned)
+            .ok_or(CodecError::MalformedDirectory)?;
+        if padding.iter().any(|byte| *byte != 0) {
+            return Err(CodecError::MalformedDirectory);
+        }
+        self.cursor = aligned;
+        Ok(())
+    }
+
+    fn take(&mut self, len: usize) -> Result<&'a [u8], CodecError> {
+        let end = self
+            .cursor
+            .checked_add(len)
+            .ok_or(CodecError::SizeOverflow)?;
+        let value = self
+            .bytes
+            .get(self.cursor..end)
+            .ok_or(CodecError::MalformedDirectory)?;
+        self.cursor = end;
+        Ok(value)
+    }
+
+    fn u8(&mut self) -> Result<u8, CodecError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, CodecError> {
+        self.align(4)?;
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("length"),
+        ))
+    }
+
+    fn u64(&mut self) -> Result<u64, CodecError> {
+        self.align(8)?;
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("length"),
+        ))
+    }
+
+    fn string(&mut self, budgets: &mut ByteBudgets) -> Result<String, CodecError> {
+        let len = self.u32()? as usize;
+        let bytes = self.take(len)?;
+        let value = core::str::from_utf8(bytes).map_err(|_| CodecError::InvalidUtf8)?;
+        budgets.copy_string(value)
+    }
+
+    fn finish(self) -> Result<(), CodecError> {
+        if self.cursor == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(CodecError::MalformedDirectory)
+        }
+    }
 }
 
 fn encode_manifest(manifest: &ModuleManifest) -> Vec<u8> {
@@ -808,27 +1228,40 @@ fn encode_manifest(manifest: &ModuleManifest) -> Vec<u8> {
     }
     out
 }
-fn decode_manifest(bytes: &[u8]) -> Result<ModuleManifest, CodecError> {
+fn decode_manifest(
+    bytes: &[u8],
+    limits: ContainerLimits,
+    budgets: &mut ByteBudgets,
+) -> Result<ModuleManifest, CodecError> {
+    budgets.decoded(bytes.len())?;
     let mut r = Reader::new(bytes);
-    let name = r.string()?;
+    let name = r.string_with_budget(budgets)?;
     let major = r.u16()?;
     let minor = r.u16()?;
     if major != 1 || minor != 0 {
         return Err(CodecError::UnsupportedFormat { major, minor });
     }
     let dialect_count = r.bounded_count(8)?;
-    let mut dialects = Vec::new();
-    dialects
-        .try_reserve_exact(dialect_count)
-        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
+    enforce_limit(
+        ContainerLimitKind::ManifestDialects,
+        limits.max_manifest_dialects,
+        dialect_count,
+    )?;
+    let mut dialects = budgets.reserve::<DialectRequirement>(dialect_count)?;
     for _ in 0..dialect_count {
-        dialects.push(DialectRequirement::new(r.string()?, r.u16()?, r.u16()?));
+        dialects.push(DialectRequirement::new(
+            r.string_with_budget(budgets)?,
+            r.u16()?,
+            r.u16()?,
+        ));
     }
     let root_count = r.bounded_count(4)?;
-    let mut roots = Vec::new();
-    roots
-        .try_reserve_exact(root_count)
-        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
+    enforce_limit(
+        ContainerLimitKind::ManifestRoots,
+        limits.max_manifest_roots,
+        root_count,
+    )?;
+    let mut roots = budgets.reserve::<u32>(root_count)?;
     for _ in 0..root_count {
         roots.push(r.u32()?);
     }
@@ -853,24 +1286,51 @@ fn encode_schema_bundle(ranges: &[ConstantRange]) -> Vec<u8> {
     out
 }
 
-fn decode_schema_bundle(bytes: &[u8]) -> Result<Vec<Schema>, CodecError> {
+fn decode_schema_bundle(
+    bytes: &[u8],
+    limits: ContainerLimits,
+    budgets: &mut ByteBudgets,
+) -> Result<Vec<Schema>, CodecError> {
+    budgets.decoded(bytes.len())?;
     let mut r = Reader::new(bytes);
     let count = r.bounded_count(4)?;
-    let mut schemas = Vec::new();
-    schemas
-        .try_reserve_exact(count)
-        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
+    enforce_limit(ContainerLimitKind::Schemas, limits.max_schemas, count)?;
+    let mut schemas = budgets.reserve::<Schema>(count)?;
     for _ in 0..count {
-        schemas.push(schema_from_bytes(r.bytes()?).map_err(|_| CodecError::MalformedSchemas)?);
+        let encoded = r.bytes()?;
+        let remaining = limits.max_retained_bytes.saturating_sub(budgets.retained);
+        let (schema, owned_bytes) = schema_from_bytes(
+            encoded,
+            phon_schema::DecodeLimits::DEFAULT.with_max_owned_bytes(remaining),
+        )
+        .map_err(map_schema_decode_error)?;
+        budgets.retained(owned_bytes)?;
+        schemas.push(schema);
     }
     r.finish()?;
     Ok(schemas)
+}
+
+fn map_schema_decode_error(error: phon_schema::DecodeError) -> CodecError {
+    match error {
+        phon_schema::DecodeError::OwnedBytesLimitExceeded {
+            configured,
+            attempted,
+        } => CodecError::ContainerLimitExceeded {
+            kind: ContainerLimitKind::RetainedBytes,
+            configured,
+            actual: attempted,
+        },
+        phon_schema::DecodeError::AllocationFailed => CodecError::AdmissionLimitExceeded,
+        other => CodecError::SchemaDecode(other),
+    }
 }
 
 fn validate_constant_range_sections(
     parsed: &Parsed<'_>,
     compact_registry: &Registry,
     aligned_registry: &AlignedRegistry,
+    budgets: &mut ByteBudgets,
 ) -> Result<(), CodecError> {
     for section in parsed
         .sections
@@ -883,6 +1343,7 @@ fn validate_constant_range_sections(
         }
         let schema = SchemaId::from_raw(section.schema_id);
         let bytes = parsed.section(section.kind)?;
+        budgets.decoded(bytes.len())?;
         match profile {
             StorageProfile::Aligned => {
                 let document = AlignedDocument::parse(bytes, schema, aligned_registry)
@@ -912,36 +1373,45 @@ fn validate_constant_range_sections(
 fn decode_constant_ranges(
     parsed: &Parsed<'_>,
     registry: &Registry,
+    budgets: &mut ByteBudgets,
 ) -> Result<Vec<ConstantRange>, CodecError> {
-    parsed
+    let range_count = parsed
         .sections
         .iter()
         .filter(|section| section.kind >= SECTION_CONSTANT_RANGE_BASE)
-        .map(|section| {
-            let root = SchemaId::from_raw(section.schema_id);
-            let mut schemas = Vec::new();
-            collect_schema_closure(root, registry, &mut schemas)?;
-            let root_index = schemas
-                .iter()
-                .position(|schema| schema.id == root)
-                .ok_or(CodecError::MalformedSchemas)?;
+        .count();
+    let mut ranges = budgets.reserve::<ConstantRange>(range_count)?;
+    for section in parsed
+        .sections
+        .iter()
+        .filter(|section| section.kind >= SECTION_CONSTANT_RANGE_BASE)
+    {
+        let root = SchemaId::from_raw(section.schema_id);
+        let mut schemas = Vec::new();
+        collect_schema_closure(root, registry, &mut schemas, budgets)?;
+        let root_index = schemas
+            .iter()
+            .position(|schema| schema.id == root)
+            .ok_or(CodecError::MalformedSchemas)?;
+        ranges.push(
             ConstantRange::new(
                 schemas,
                 root_index,
                 section.profile.ok_or(CodecError::MalformedDirectory)?,
                 section.count,
                 section.stride,
-                parsed.section(section.kind)?.to_vec(),
+                budgets.copy_bytes(parsed.section(section.kind)?)?,
             )
-            .map_err(CodecError::ConstantRange)
-        })
-        .collect()
+            .map_err(CodecError::ConstantRange)?,
+        );
+    }
+    Ok(ranges)
 }
-
 fn collect_schema_closure(
     id: SchemaId,
     registry: &Registry,
     out: &mut Vec<Schema>,
+    budgets: &mut ByteBudgets,
 ) -> Result<(), CodecError> {
     if out.iter().any(|schema| schema.id == id) || registry.primitive(id).is_some() {
         return Ok(());
@@ -950,13 +1420,22 @@ fn collect_schema_closure(
         .composite(id)
         .ok_or(CodecError::MalformedSchemas)?
         .clone();
-    let mut references = Vec::new();
+    let mut references = budgets.reserve::<SchemaId>(schema_reference_count(&schema.kind))?;
     visit_schema_refs(&schema.kind, &mut |reference| references.push(reference));
     for reference in references {
-        collect_schema_closure(reference, registry, out)?;
+        collect_schema_closure(reference, registry, out, budgets)?;
     }
+    budgets.retained(core::mem::size_of::<Schema>())?;
+    out.try_reserve(1)
+        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
     out.push(schema);
     Ok(())
+}
+
+fn schema_reference_count(kind: &SchemaKind) -> usize {
+    let mut count = 0;
+    visit_schema_refs(kind, &mut |_| count += 1);
+    count
 }
 
 fn visit_schema_refs(kind: &SchemaKind, visit: &mut dyn FnMut(SchemaId)) {
@@ -1135,34 +1614,51 @@ fn encode_op<C: IntrinsicCodec>(
 }
 fn decode_program<C: IntrinsicCodec>(
     bytes: &[u8],
+    limits: ContainerLimits,
+    budgets: &mut ByteBudgets,
 ) -> Result<DenseLowered<WeavyOp<BlockRef, C::Intrinsic>>, CodecError> {
+    budgets.decoded(bytes.len())?;
     let mut r = Reader::new(bytes);
-    let program = decode_ops::<C>(&mut r)?;
+    let mut total_ops = 0;
+    let program = decode_ops::<C>(&mut r, limits, &mut total_ops, budgets)?;
     let count = r.bounded_count(4)?;
-    let mut blocks = Vec::new();
-    blocks
-        .try_reserve_exact(count)
-        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
+    enforce_limit(
+        ContainerLimitKind::ProgramBlocks,
+        limits.max_program_blocks,
+        count,
+    )?;
+    let mut blocks = budgets.reserve::<Vec<WeavyOp<BlockRef, C::Intrinsic>>>(count)?;
     for _ in 0..count {
-        blocks.push(decode_ops::<C>(&mut r)?);
+        blocks.push(decode_ops::<C>(&mut r, limits, &mut total_ops, budgets)?);
     }
     r.finish()?;
     Ok(DenseLowered::new(program, blocks))
 }
 fn decode_ops<C: IntrinsicCodec>(
     r: &mut Reader<'_>,
+    limits: ContainerLimits,
+    total_ops: &mut usize,
+    budgets: &mut ByteBudgets,
 ) -> Result<Vec<WeavyOp<BlockRef, C::Intrinsic>>, CodecError> {
     let count = r.bounded_count(1)?;
-    let mut ops = Vec::new();
-    ops.try_reserve_exact(count)
-        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
+    *total_ops = total_ops
+        .checked_add(count)
+        .ok_or(CodecError::SizeOverflow)?;
+    enforce_limit(
+        ContainerLimitKind::ProgramOps,
+        limits.max_program_ops,
+        *total_ops,
+    )?;
+    let mut ops = budgets.reserve::<WeavyOp<BlockRef, C::Intrinsic>>(count)?;
     for _ in 0..count {
-        ops.push(decode_op::<C>(r)?);
+        ops.push(decode_op::<C>(r, limits, budgets)?);
     }
     Ok(ops)
 }
 fn decode_op<C: IntrinsicCodec>(
     r: &mut Reader<'_>,
+    limits: ContainerLimits,
+    budgets: &mut ByteBudgets,
 ) -> Result<WeavyOp<BlockRef, C::Intrinsic>, CodecError> {
     Ok(match r.u8()? {
         1 => WeavyOp::Control(ControlOp::CallBlock {
@@ -1182,10 +1678,12 @@ fn decode_op<C: IntrinsicCodec>(
         }),
         11 => {
             let n = r.bounded_count(24)?;
-            let mut segments = Vec::new();
-            segments
-                .try_reserve_exact(n)
-                .map_err(|_| CodecError::AdmissionLimitExceeded)?;
+            enforce_limit(
+                ContainerLimitKind::ScalarSegments,
+                limits.max_scalar_segments,
+                n,
+            )?;
+            let mut segments = budgets.reserve::<ScalarSegment>(n)?;
             for _ in 0..n {
                 segments.push(ScalarSegment {
                     offset: r.usize()?,
@@ -1225,9 +1723,6 @@ fn decode_op<C: IntrinsicCodec>(
             offset: r.usize()?,
             pointee: r.layout()?,
         }),
-        30 => WeavyOp::Aggregate(AggregateOp::BeginRecord {
-            field_count: r.usize()?,
-        }),
         31 => WeavyOp::Aggregate(AggregateOp::RecordField {
             index: r.usize()?,
             offset: r.usize()?,
@@ -1243,25 +1738,48 @@ fn decode_op<C: IntrinsicCodec>(
         _ => return Err(CodecError::MalformedProgram),
     })
 }
-fn inspect_program(bytes: &[u8]) -> Result<(usize, usize), CodecError> {
+
+fn inspect_program(
+    bytes: &[u8],
+    limits: ContainerLimits,
+    budgets: &mut ByteBudgets,
+) -> Result<(usize, usize), CodecError> {
+    budgets.decoded(bytes.len())?;
     let mut r = Reader::new(bytes);
-    let roots = skip_ops(&mut r)?;
-    let blocks = r.u32()? as usize;
+    let roots = skip_ops(&mut r, limits)?;
+    let blocks = r.bounded_count(4)?;
+    enforce_limit(
+        ContainerLimitKind::ProgramBlocks,
+        limits.max_program_blocks,
+        blocks,
+    )?;
     let mut total = roots;
     for _ in 0..blocks {
-        total += skip_ops(&mut r)?;
+        total = total
+            .checked_add(skip_ops(&mut r, limits)?)
+            .ok_or(CodecError::SizeOverflow)?;
+        enforce_limit(
+            ContainerLimitKind::ProgramOps,
+            limits.max_program_ops,
+            total,
+        )?;
     }
     r.finish()?;
     Ok((total, blocks))
 }
-fn skip_ops(r: &mut Reader<'_>) -> Result<usize, CodecError> {
-    let count = r.u32()? as usize;
+fn skip_ops(r: &mut Reader<'_>, limits: ContainerLimits) -> Result<usize, CodecError> {
+    let count = r.bounded_count(1)?;
+    enforce_limit(
+        ContainerLimitKind::ProgramOps,
+        limits.max_program_ops,
+        count,
+    )?;
     for _ in 0..count {
-        skip_op(r)?;
+        skip_op(r, limits)?;
     }
     Ok(count)
 }
-fn skip_op(r: &mut Reader<'_>) -> Result<(), CodecError> {
+fn skip_op(r: &mut Reader<'_>, limits: ContainerLimits) -> Result<(), CodecError> {
     match r.u8()? {
         1 => {
             r.u32()?;
@@ -1279,8 +1797,15 @@ fn skip_op(r: &mut Reader<'_>) -> Result<(), CodecError> {
             }
         }
         11 => {
-            let n = r.u32()?;
-            for _ in 0..n * 3 {
+            let n = r.bounded_count(24)?;
+            enforce_limit(
+                ContainerLimitKind::ScalarSegments,
+                limits.max_scalar_segments,
+                n,
+            )?;
+            for _ in 0..n {
+                r.u64()?;
+                r.u64()?;
                 r.u64()?;
             }
         }
@@ -1333,28 +1858,40 @@ fn encode_constants(pool: &ConstantPool) -> Result<Vec<u8>, CodecError> {
     }
     Ok(out)
 }
-fn decode_constants(bytes: &[u8]) -> Result<ConstantPool, CodecError> {
+fn decode_constants(
+    bytes: &[u8],
+    limits: ContainerLimits,
+    budgets: &mut ByteBudgets,
+) -> Result<ConstantPool, CodecError> {
+    budgets.decoded(bytes.len())?;
     let mut r = Reader::new(bytes);
     let count = r.bounded_count(12)?;
-    let mut constants = Vec::new();
-    constants
-        .try_reserve_exact(count)
-        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
+    enforce_limit(ContainerLimitKind::Constants, limits.max_constants, count)?;
+    let mut constants = budgets.reserve::<Constant>(count)?;
     for _ in 0..count {
-        constants.push(Constant::new(r.u64()?, r.bytes()?.to_vec()));
+        let schema_id = r.u64()?;
+        let bytes = budgets.copy_bytes(r.bytes()?)?;
+        constants.push(Constant::new(schema_id, bytes));
     }
     r.finish()?;
     Ok(ConstantPool::new(constants))
 }
-fn inspect_constants(bytes: &[u8]) -> Result<usize, CodecError> {
+
+fn inspect_constants(
+    bytes: &[u8],
+    limits: ContainerLimits,
+    budgets: &mut ByteBudgets,
+) -> Result<usize, CodecError> {
+    budgets.decoded(bytes.len())?;
     let mut r = Reader::new(bytes);
-    let count = r.u32()?;
+    let count = r.bounded_count(12)?;
+    enforce_limit(ContainerLimitKind::Constants, limits.max_constants, count)?;
     for _ in 0..count {
         r.u64()?;
         r.bytes()?;
     }
     r.finish()?;
-    Ok(count as usize)
+    Ok(count)
 }
 
 fn executable_identity(bytes: &[u8]) -> [u8; 16] {
@@ -1482,8 +2019,10 @@ impl<'a> Reader<'a> {
         }
         Ok(count)
     }
-    fn string(&mut self) -> Result<String, CodecError> {
-        String::from_utf8(self.bytes()?.to_vec()).map_err(|_| CodecError::InvalidUtf8)
+    fn string_with_budget(&mut self, budgets: &mut ByteBudgets) -> Result<String, CodecError> {
+        let bytes = self.bytes()?;
+        let value = core::str::from_utf8(bytes).map_err(|_| CodecError::InvalidUtf8)?;
+        budgets.copy_string(value)
     }
     fn layout(&mut self) -> Result<Layout, CodecError> {
         Ok(Layout {
@@ -1508,6 +2047,11 @@ pub enum CodecError {
     BadMagic,
     MalformedHeader,
     AdmissionLimitExceeded,
+    ContainerLimitExceeded {
+        kind: ContainerLimitKind,
+        configured: usize,
+        actual: usize,
+    },
     UnsupportedFormat {
         major: u16,
         minor: u16,
@@ -1544,6 +2088,7 @@ pub enum CodecError {
     TrailingBytes {
         count: usize,
     },
+    SchemaDecode(phon_schema::DecodeError),
     Phon(compact::CompactError),
     MissingConstantRange {
         id: u32,
@@ -1563,6 +2108,7 @@ impl std::error::Error for CodecError {}
 #[cfg(test)]
 mod range_validation_tests {
     use super::*;
+    use facet_value::{VArray, VObject, VString};
 
     #[test]
     fn aligned_range_count_must_match_directory() {
@@ -1611,8 +2157,14 @@ mod range_validation_tests {
             }],
             identity: [0; 16],
         };
+        let mut budgets = ByteBudgets::new(ContainerLimits::DEFAULT);
         assert!(matches!(
-            validate_constant_range_sections(&parsed, &compact_registry, &aligned_registry),
+            validate_constant_range_sections(
+                &parsed,
+                &compact_registry,
+                &aligned_registry,
+                &mut budgets,
+            ),
             Err(CodecError::MalformedConstantRange)
         ));
     }
