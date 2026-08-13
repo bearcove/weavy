@@ -22,8 +22,10 @@ pub use exec::{
 };
 pub use module::{
     CanonicalNameError, FeatureDescriptor, FeatureId, FeatureNamespace, FeatureRequirement,
-    FeatureSupport, FeatureSupportError, PolicyDescriptor, PolicyHistoryError, PolicyKey,
-    PolicyRequirement, PolicyVersion, RuntimeSemanticSupport, RuntimeSemanticSupportError,
+    FeatureSupport, FeatureSupportError, PolicyDecision, PolicyDecisionAuthority,
+    PolicyDecisionAuthorityError, PolicyDecisionRecord, PolicyDecisionRecordError,
+    PolicyDecisionRow, PolicyDescriptor, PolicyHistoryError, PolicyKey, PolicyRequirement,
+    PolicyResolution, PolicyVersion, RuntimeSemanticSupport, RuntimeSemanticSupportError,
 };
 pub use task::StructuralFieldSource;
 pub use verified::{
