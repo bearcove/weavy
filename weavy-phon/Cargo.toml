@@ -13,8 +13,8 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 blake3.workspace = true
 weavy.workspace = true
-phon-schema = { git = "https://github.com/bearcove/phon", rev = "fc6388f" }
-phon-storage = { git = "https://github.com/bearcove/phon", rev = "fc6388f" }
+phon-schema = { git = "https://github.com/bearcove/phon", rev = "724ae5d" }
+phon-storage = { git = "https://github.com/bearcove/phon", rev = "724ae5d" }
 facet-value = { git = "https://github.com/facet-rs/facet", rev = "5705fa6c51289bea49f5729c52dc5e23cedce4f8" }
 
 [dev-dependencies]

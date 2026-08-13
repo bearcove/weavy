@@ -5,7 +5,7 @@ use core::fmt;
 use facet_value::Value;
 use phon_schema::{
     Field, Primitive, Schema, SchemaId, SchemaKind, SchemaRef, primitive_id, resolve_ids,
-    schema_from_bytes, schema_to_bytes,
+    schema_from_bytes, schema_matches_bytes, schema_to_bytes,
 };
 use phon_storage::compact::Registry;
 use phon_storage::{AlignedDocument, AlignedRegistry, DenseRange, compact};
@@ -1318,6 +1318,10 @@ fn decode_schema_bundle(
     let count = r.bounded_count(4)?;
     enforce_limit(ContainerLimitKind::Schemas, limits.max_schemas, count)?;
     let mut schemas = budgets.reserve::<Schema>(count)?;
+    let mut schema_ids = Vec::new();
+    schema_ids
+        .try_reserve_exact(count)
+        .map_err(|_| CodecError::AdmissionLimitExceeded)?;
     for _ in 0..count {
         let encoded = r.bytes()?;
         let remaining = limits.max_retained_bytes.saturating_sub(budgets.retained);
@@ -1326,10 +1330,18 @@ fn decode_schema_bundle(
             phon_schema::DecodeLimits::DEFAULT.with_max_owned_bytes(remaining),
         )
         .map_err(map_schema_decode_error)?;
+        if !schema_matches_bytes(&schema, encoded) {
+            return Err(CodecError::MalformedSchemas);
+        }
         budgets.retained(owned_bytes)?;
+        schema_ids.push(schema.id);
         schemas.push(schema);
     }
     r.finish()?;
+    schema_ids.sort_unstable();
+    if schema_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(CodecError::MalformedSchemas);
+    }
     Ok(schemas)
 }
 
@@ -2195,6 +2207,22 @@ mod range_validation_tests {
                 &mut budgets,
             ),
             Err(CodecError::MalformedConstantRange)
+        ));
+    }
+
+    #[test]
+    fn schema_bundle_rejects_duplicate_ids_before_registry_construction() {
+        let schema = directory_schemas().0[0].clone();
+        let encoded = schema_to_bytes(&schema);
+        let mut bytes = Vec::new();
+        put_u32(&mut bytes, 2);
+        put_bytes(&mut bytes, &encoded);
+        put_bytes(&mut bytes, &encoded);
+        let mut budgets = ByteBudgets::new(ContainerLimits::DEFAULT);
+
+        assert!(matches!(
+            decode_schema_bundle(&bytes, ContainerLimits::DEFAULT, &mut budgets),
+            Err(CodecError::MalformedSchemas)
         ));
     }
 }
