@@ -18,19 +18,9 @@ Use a fresh Pro session for every major checkpoint:
 
 Reuse a session only for bounded follow-up on the same package release and review round. A corrected release may remain in the same session only when authority, checkpoint, target, and question set are unchanged and the follow-up is explicitly limited to named findings. The reviewer must verify the new release identity, treat the earlier release as superseded, and identify conclusions carried forward from the prior round.
 
-The current long-running Pro session may receive the first planning package as a transition preflight and may perform a comparison review, but it cannot certify self-containment. Before the planning package is accepted, a separate fresh Pro session must complete a cold-start orientation check using only the released package. The formal review record identifies which session supplied the substantive review and which supplied the cold-start check.
+The current long-running Pro session may receive the first planning package as a transition preflight and may perform a comparison review, but it cannot certify self-containment. Before the planning package is accepted, a separate clean-room Pro session must complete the cold-start orientation check using only the released package. A clean-room session has no saved memory, prior-chat summaries, File Library search, connected project sources, or previous project uploads. A separate account, temporary workspace, or verified memory-disabled environment qualifies. The formal review record identifies the isolation mode and which session supplied each review.
 
-The cold-start reviewer must identify:
-
-- the exact checkpoint and review target;
-- both authority planes and their precedence;
-- settled and open decisions;
-- the complete question set and requested output;
-- current implementation state;
-- every required package entry;
-- facts it cannot establish from the package.
-
-Any project-specific conclusion that depends on prior chat history is a package defect.
+The clean-room reviewer must identify the checkpoint, target, authority planes, settled/open decisions, question/output set, implementation state, required entries, and facts not established by the package. Every project-specific conclusion must cite a packaged artifact. An uncited project-specific conclusion is unsupported even when correct.
 
 ## Release identity
 
@@ -48,19 +38,9 @@ weavy-pro-review-….zip.sha256
 weavy-pro-review-….release.json
 ```
 
-The archive SHA-256 is never embedded in the bytes it identifies. The detached release descriptor records:
+The archive SHA-256 is never embedded in the bytes it identifies. The detached release descriptor records package schema version, checkpoint/package revision, exact archive SHA-256, frozen `SOURCE_DATE_EPOCH`, primary Weavy revision, complete `source_set_id`, generator/ZIP versions, secret-scanning policy/version and final security-report digest, superseded release identity, and hashes of transport derivatives.
 
-- package schema version;
-- checkpoint ID and package revision;
-- exact archive SHA-256;
-- frozen `SOURCE_DATE_EPOCH`;
-- primary Weavy revision;
-- complete source-set identity;
-- generator and ZIP implementation versions;
-- superseded release identity, when applicable;
-- hashes of detached transport derivatives.
-
-The primary commit in the filename is convenient provenance. The source-set identity is the identity of every packaged repository/worktree input.
+All machine control files use the package schema's pinned canonical JSON serialization. `worktree_snapshot_id` is SHA-256 of the canonical repository snapshot record plus the complete sorted packaged repository-source records: source kind, repository-relative path, Git object identity when present, exact file SHA-256, mode, submodule state, and LFS identity. `source_set_id` is SHA-256 of the canonical sorted sequence of all repository `worktree_snapshot_id` values plus all non-repository authoritative input identities. `<sourceset8>` is its first eight lowercase hexadecimal characters. The schema fixes Git commands/configuration, path quoting, diff form, and byte encoding used by `git_status_sha256` and `included_diff_sha256`.
 
 ## Canonical machine-readable control files
 
@@ -82,15 +62,19 @@ package_revision
 review_target
 normative_authority_set
 factual_authority_set
-settled_decision_ids
-open_decision_ids
-question_ids
-required_output_sections
+settled_decisions: [{ id, text }]
+open_decisions: [{ id, text }]
+questions: [{ id, text }]
+required_output_sections: [{ id, text }]
 severity_schema
 confidence_schema
 prohibited_scope
 repository_snapshots
 source_date_epoch
+max_required_review_bytes
+max_required_review_lines
+max_required_review_tokens
+max_archive_expanded_bytes
 ```
 
 `00-START-HERE.md`, `01-REVIEW-PROMPT.md`, `03-AUTHORITY-AND-SCOPE.md`, `06-QUESTIONS-FOR-PRO.md`, and `08-FILE-MANIFEST.md` are generated from or mechanically validated against this descriptor.
@@ -105,10 +89,10 @@ PLAN-DURABILITY-003
 
 ### `package-manifest.json`
 
-This file lists every archive entry except itself. Validation requires:
+This file lists every archive entry except itself. The canonical ZIP contains no explicit directory entries. Validation requires:
 
 ```text
-archive entries == package-manifest entries + package-manifest.json
+archive file entries == package-manifest file entries + package-manifest.json
 ```
 
 For each repository it records:
@@ -182,9 +166,7 @@ weavy-pro-review-<checkpoint>-r<revision>-<weavy-commit>-<sourceset8>/
 
 States the release identity, checkpoint, purpose, reading order, both authority planes, output contract, accessibility preflight, and the distinction between authoritative, proposed, generated, and evidence-only files.
 
-The first review action is:
-
-> Confirm that every required package entry is accessible. If the archive cannot be enumerated or a required file cannot be opened, stop and report a package-transport defect. Do not compensate by searching public repositories or relying on chat history.
+> Confirm the detached release identity, then confirm that every required package entry is accessible through either the canonical ZIP or a transport derivative whose digest and projection rule appear in the detached release descriptor. If any required entry is inaccessible through both forms, stop and report a package-transport defect. Do not compensate through chat history, public repositories, File Library search, or unlisted external sources.
 
 ### `01-REVIEW-PROMPT.md`
 
@@ -229,15 +211,15 @@ Defines two independent authority planes.
 5. approved Gate 0 or checkpoint plan;
 6. implementation choices where higher authority leaves freedom.
 
-**Factual precedence — what is currently true**
+**Factual evidence classes — what is currently true**
 
-1. exact packaged repository/worktree snapshots;
-2. reproducible raw command, test, benchmark, and inspection evidence tied to those snapshots;
-3. recorded but not package-reproducible evidence;
-4. generated summaries and orientation prose;
-5. historical drafts and superseded proposals.
+- Exact packaged source bytes establish what code and data are present.
+- Reproducible raw execution evidence establishes what occurred under its recorded environment.
+- Recorded but non-reproducible evidence supports only its explicitly bounded claim.
+- Generated summaries and orientation prose are indexes into stronger evidence.
+- Historical drafts and superseded proposals are context only.
 
-A factual artifact cannot silently override normative authority. It may demonstrate that authority is unimplemented, inconsistent, or unconstructible. Historical drafts are context only.
+These are evidence classes, not a universal total order. Apparent source/execution conflict is reported rather than resolved by mechanically ranking one above the other. No factual artifact silently overrides normative authority; it may demonstrate that authority is unimplemented, inconsistent, or unconstructible.
 
 A settled decision may be reopened only by a demonstrated contradiction: an exact higher-authority conflict, constructibility or dependency proof, minimal counterexample, exact current-source evidence, or reproducible experiment. Reopening is limited to the smallest affected decision.
 
@@ -247,27 +229,8 @@ The document also lists allowed conclusions, excluded subsystems, and decisions 
 
 Records exact repository/worktree snapshots, implemented and unimplemented components, verification evidence, known limitations, unresolved gates, relevant concurrent work, and artifact classifications.
 
-Every verification evidence item records:
+Every verification evidence item records command; `repository_id + repository_relative_working_directory`; repository snapshot; OS/architecture; toolchain; feature/profile selection; relevant environment; start/end time; exit status; stdout/stderr/raw-result paths and hashes; package reproducibility; and reason when not reproducible. An exact original absolute path remains only in classified raw evidence or through a documented reversible/redacted mapping. Generated summaries cite raw evidence.
 
-```text
-command
-working_directory
-repository_snapshot
-OS and architecture
-toolchain versions
-feature/profile selection
-relevant environment
-start_time
-end_time
-exit_status
-stdout_path and sha256
-stderr_path and sha256
-raw_result_path
-reproducible_from_package
-reason_if_false
-```
-
-Generated prose summaries cite raw evidence.
 
 ### `05-DECISIONS-AND-NON-GOALS.md`
 
@@ -309,9 +272,11 @@ Makes review coverage falsifiable. It records:
 - known blind spots;
 - why selected evidence is sufficient;
 - total package size;
-- required-review byte, line, and estimated token budget;
+- required-review byte, line, and estimated-token counts plus the schema-defined estimation method and safety margin;
 - consultable/evidence-only size;
 - files not expected to be read completely.
+
+Generated required-review estimates must not exceed `checkpoint.json` limits. An over-budget release must be split, reduce required reading, or move genuinely nonessential material to consultable/evidence-only status; documenting an oversized review does not pass validation.
 
 The reviewer must end with:
 
@@ -378,7 +343,7 @@ Canonical ZIP generation freezes:
 - no ZIP comments;
 - no uncontrolled extra fields;
 - one pinned ZIP implementation and compression configuration;
-- explicit directory-entry policy;
+- no explicit directory entries;
 - one top-level directory;
 - package schema version.
 
@@ -390,16 +355,16 @@ Two generations from unchanged manifest inputs must be byte-identical.
 
 Validation proves:
 
-- every control-document path resolves to a manifested entry;
+- every active control-document path resolves to a manifested entry;
 - every authority reference resolves to an exact file and digest;
-- question IDs and text agree across `checkpoint.json`, `01`, and `06`;
-- required response sections, severity, and confidence schemas agree;
-- repository revisions and source-set identity agree everywhere;
+- question and decision IDs/text agree across `checkpoint.json` and generated documents;
+- required output sections, severity, confidence, limits, repositories, and source-set identity agree;
 - no document names a superseded release as current;
 - generated orientation claims cite packaged authority;
-- no released root document contains an absolute host path unless explicitly classified as evidence;
-- no `local://paste-*`, `/tmp/*`, `/Users/*`, stale revision, or absent-file reference survives;
-- generated line-numbered views link to the exact source digest while originals remain present.
+- no active reference in `checkpoint.json`, prompt, orientation, authority, decisions, questions, coverage, or human manifest depends on an absolute host path, ephemeral URI, stale revision, or absent file;
+- immutable prior reports and classified raw evidence may contain such strings only as inert historical data, never resolvable current references;
+- the active-link/control-field linter rejects `local://paste-*`, `/tmp/*`, `/Users/*`, stale revisions, and absent paths in active fields;
+- generated line-numbered views link to exact source digests while originals remain present.
 
 ## Transport derivatives
 
@@ -412,7 +377,7 @@ ZIP is canonical but is not assumed to be directly inspectable in every review e
 
 It may provide a deterministic `REVIEW-BUNDLE.md` or extracted upload set. Transport derivatives are not separate authority; the release descriptor records their hashes, and validation proves their contents match archive entries or a documented deterministic projection.
 
-A transport preflight must prove that the target session can enumerate and open every required entry before substantive review begins.
+A transport preflight in the actual target session must prove that the detached release identity is correct and every required entry is accessible through the ZIP or a recorded transport derivative before substantive review begins.
 
 ## Review-round lifecycle
 
@@ -425,13 +390,14 @@ A transport preflight must prove that the target session can enumerate and open 
 7. Run path/content security scanning and record manual dispositions.
 8. Generate the canonical ZIP twice and require byte identity.
 9. Generate detached release descriptor, SHA-256, and transport derivatives.
-10. Run transport accessibility preflight.
-11. Give the ZIP and paste-ready prompt to Pro.
-12. Run the fresh-session cold-start orientation check.
-13. Perform substantive review and classify findings.
-14. Preserve exact final report, owner disposition, and applied changes.
-15. Produce `r2` only for warranted same-checkpoint follow-up.
-16. Start the next major checkpoint in a fresh session and release.
+10. Run the final security scan over the complete detached release set and record its digest.
+11. Upload or otherwise present release artifacts to the target session.
+12. Run release-identity and accessibility preflight in that session.
+13. Supply or activate the paste-ready prompt.
+14. Run the clean-room cold-start orientation check, then substantive review.
+15. Preserve exact final report, owner disposition, and applied changes.
+16. Produce `r2` only for warranted same-checkpoint follow-up.
+17. Start the next major checkpoint in a fresh session and release.
 
 ## First implementation-planning package
 
@@ -469,8 +435,8 @@ The first planning release is ready only when:
 | Container evidence | Current PHON/Weavy wire sources and tests |
 | Prior-review provenance | Exact final reports and owner disposition ledger |
 | Determinism | Two canonical builds produce identical ZIP bytes |
-| Security | Path/content scans pass; dispositions and proprietary upload approval recorded |
-| Transport | Target review environment can enumerate and open every required entry |
-| Cold-start orientation | Fresh session identifies scope, authority, questions, state, and missing facts using only the release |
-| Prompt integrity | No stale revision, absent file, host path, or ephemeral URI remains |
-| Reviewability | Required-reading budget and omissions ledger are present |
+| Security | Final detached-set path/content scan passes; policy/version, report digest, dispositions, and proprietary upload approval recorded |
+| Transport | Target session validates release identity and opens every required entry through ZIP or recorded derivative |
+| Cold-start orientation | Clean-room session with external context disabled cites package artifacts for scope, authority, questions, state, and missing facts |
+| Prompt integrity | No stale revision, absent file, host path, or ephemeral URI appears as an active reference |
+| Reviewability | Required-reading estimates remain within checkpoint limits and omissions ledger is present |
