@@ -78,6 +78,290 @@ impl FeatureId {
     }
 }
 
+/// Minimum semantic feature version required by a module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FeatureRequirement {
+    namespace: FeatureNamespace,
+    stable_id: FeatureId,
+    major: u16,
+    min_minor: u16,
+}
+
+impl FeatureRequirement {
+    #[must_use]
+    pub const fn new(
+        namespace: FeatureNamespace,
+        stable_id: FeatureId,
+        major: u16,
+        min_minor: u16,
+    ) -> Self {
+        Self {
+            namespace,
+            stable_id,
+            major,
+            min_minor,
+        }
+    }
+
+    #[must_use]
+    pub const fn namespace(&self) -> FeatureNamespace {
+        self.namespace
+    }
+
+    #[must_use]
+    pub const fn stable_id(&self) -> FeatureId {
+        self.stable_id
+    }
+
+    #[must_use]
+    pub const fn major(&self) -> u16 {
+        self.major
+    }
+
+    #[must_use]
+    pub const fn min_minor(&self) -> u16 {
+        self.min_minor
+    }
+}
+
+/// Authority-preserving semantic feature descriptor for one compatible major line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeatureDescriptor {
+    namespace: FeatureNamespace,
+    canonical_name: Arc<str>,
+    stable_id: FeatureId,
+    major: u16,
+    max_minor: u16,
+    semantic_descriptor_digest: [u8; 32],
+}
+
+impl FeatureDescriptor {
+    pub fn new(
+        namespace: FeatureNamespace,
+        canonical_name: impl AsRef<str>,
+        major: u16,
+        max_minor: u16,
+        semantic_descriptor_digest: [u8; 32],
+    ) -> Result<Self, CanonicalNameError> {
+        let canonical_name = canonical_name.as_ref();
+        let stable_id = FeatureId::new(namespace, canonical_name)?;
+        Ok(Self {
+            namespace,
+            canonical_name: Arc::from(canonical_name),
+            stable_id,
+            major,
+            max_minor,
+            semantic_descriptor_digest,
+        })
+    }
+
+    #[must_use]
+    pub const fn namespace(&self) -> FeatureNamespace {
+        self.namespace
+    }
+
+    #[must_use]
+    pub fn canonical_name(&self) -> &str {
+        &self.canonical_name
+    }
+
+    #[must_use]
+    pub const fn stable_id(&self) -> FeatureId {
+        self.stable_id
+    }
+
+    #[must_use]
+    pub const fn major(&self) -> u16 {
+        self.major
+    }
+
+    #[must_use]
+    pub const fn max_minor(&self) -> u16 {
+        self.max_minor
+    }
+
+    #[must_use]
+    pub const fn semantic_descriptor_digest(&self) -> &[u8; 32] {
+        &self.semantic_descriptor_digest
+    }
+
+    #[cfg(test)]
+    fn with_stable_id_for_test(mut self, stable_id: FeatureId) -> Self {
+        self.stable_id = stable_id;
+        self
+    }
+}
+
+/// One immutable runtime profile's supported semantic feature versions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FeatureSupport {
+    descriptors: Vec<FeatureDescriptor>,
+}
+
+impl FeatureSupport {
+    pub fn new(
+        descriptors: impl IntoIterator<Item = FeatureDescriptor>,
+    ) -> Result<Self, FeatureSupportError> {
+        let mut descriptors = descriptors.into_iter().collect::<Vec<_>>();
+        descriptors.sort_unstable_by_key(|descriptor| {
+            (
+                descriptor.namespace.tag(),
+                descriptor.stable_id,
+                descriptor.major,
+                descriptor.max_minor,
+            )
+        });
+
+        let mut identities = BTreeMap::<FeatureId, (FeatureNamespace, Arc<str>)>::new();
+        let mut identity_majors = BTreeMap::<(FeatureNamespace, FeatureId, u16), usize>::new();
+        for (index, descriptor) in descriptors.iter().enumerate() {
+            if let Some((namespace, canonical_name)) = identities.get(&descriptor.stable_id) {
+                if *namespace != descriptor.namespace
+                    || canonical_name.as_ref() != descriptor.canonical_name.as_ref()
+                {
+                    return Err(FeatureSupportError::FeatureIdCollision {
+                        stable_id: descriptor.stable_id,
+                        first_namespace: *namespace,
+                        first_canonical_name: canonical_name.clone(),
+                        second_namespace: descriptor.namespace,
+                        second_canonical_name: descriptor.canonical_name.clone(),
+                    });
+                }
+            } else {
+                identities.insert(
+                    descriptor.stable_id,
+                    (descriptor.namespace, descriptor.canonical_name.clone()),
+                );
+            }
+
+            let identity_major = (descriptor.namespace, descriptor.stable_id, descriptor.major);
+            if let Some(&first_index) = identity_majors.get(&identity_major) {
+                return Err(FeatureSupportError::DuplicateIdentityMajor {
+                    namespace: descriptor.namespace,
+                    stable_id: descriptor.stable_id,
+                    canonical_name: descriptor.canonical_name.clone(),
+                    major: descriptor.major,
+                    first_index,
+                    second_index: index,
+                });
+            }
+            identity_majors.insert(identity_major, index);
+        }
+
+        Ok(Self { descriptors })
+    }
+
+    #[must_use]
+    pub fn descriptors(&self) -> &[FeatureDescriptor] {
+        &self.descriptors
+    }
+
+    #[must_use]
+    pub fn supports(&self, required: &FeatureRequirement) -> bool {
+        self.descriptors
+            .binary_search_by_key(
+                &(required.namespace.tag(), required.stable_id, required.major),
+                |descriptor| {
+                    (
+                        descriptor.namespace.tag(),
+                        descriptor.stable_id,
+                        descriptor.major,
+                    )
+                },
+            )
+            .is_ok_and(|index| self.descriptors[index].max_minor >= required.min_minor)
+    }
+}
+
+/// Why an immutable semantic feature-support collection was rejected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FeatureSupportError {
+    FeatureIdCollision {
+        stable_id: FeatureId,
+        first_namespace: FeatureNamespace,
+        first_canonical_name: Arc<str>,
+        second_namespace: FeatureNamespace,
+        second_canonical_name: Arc<str>,
+    },
+    DuplicateIdentityMajor {
+        namespace: FeatureNamespace,
+        stable_id: FeatureId,
+        canonical_name: Arc<str>,
+        major: u16,
+        first_index: usize,
+        second_index: usize,
+    },
+}
+
+impl fmt::Display for FeatureSupportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid semantic feature support: {self:?}")
+    }
+}
+
+impl std::error::Error for FeatureSupportError {}
+
+#[cfg(test)]
+mod feature_support_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_stable_id_collisions_between_unequal_identity_descriptors() {
+        let stable_id = FeatureId::from_bytes([42; 16]);
+        let first =
+            FeatureDescriptor::new(FeatureNamespace::Opcode, "core.opcode.first", 1, 0, [1; 32])
+                .expect("valid descriptor")
+                .with_stable_id_for_test(stable_id);
+        let second = FeatureDescriptor::new(
+            FeatureNamespace::Helper,
+            "core.helper.second",
+            2,
+            0,
+            [2; 32],
+        )
+        .expect("valid descriptor")
+        .with_stable_id_for_test(stable_id);
+
+        assert!(matches!(
+            FeatureSupport::new([first, second]),
+            Err(FeatureSupportError::FeatureIdCollision {
+                stable_id: actual,
+                first_namespace: FeatureNamespace::Opcode,
+                second_namespace: FeatureNamespace::Helper,
+                ..
+            }) if actual == stable_id
+        ));
+    }
+
+    #[test]
+    fn rejects_stable_id_collisions_between_unequal_canonical_names() {
+        let stable_id = FeatureId::from_bytes([43; 16]);
+        let first =
+            FeatureDescriptor::new(FeatureNamespace::Opcode, "core.opcode.first", 1, 0, [1; 32])
+                .expect("valid descriptor")
+                .with_stable_id_for_test(stable_id);
+        let second = FeatureDescriptor::new(
+            FeatureNamespace::Opcode,
+            "core.opcode.second",
+            2,
+            0,
+            [2; 32],
+        )
+        .expect("valid descriptor")
+        .with_stable_id_for_test(stable_id);
+
+        assert!(matches!(
+            FeatureSupport::new([first, second]),
+            Err(FeatureSupportError::FeatureIdCollision {
+                stable_id: actual,
+                first_namespace: FeatureNamespace::Opcode,
+                second_namespace: FeatureNamespace::Opcode,
+                ..
+            }) if actual == stable_id
+        ));
+    }
+}
+
 /// A validated canonical policy identity.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PolicyKey(Arc<str>);
