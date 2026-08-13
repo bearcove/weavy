@@ -4,7 +4,7 @@ use weavy::module::{
     Constant, ConstantId, ConstantPool, ConstantReference, DialectRequirement, IntrinsicContract,
     ModuleManifest, ModuleVerifier, WeavyModule,
 };
-use weavy_phon::{CodecError, IntrinsicCodec, load, save};
+use weavy_phon::{CodecError, ContainerLimits, IntrinsicCodec, load, save};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Intrinsic(ConstantId);
@@ -45,7 +45,8 @@ fn bad_constant_id_is_rejected_before_execution() {
         ConstantPool::new(vec![Constant::new(7, vec![])]),
     );
     let bytes = save::<Codec>(&module).expect("save");
-    let decoded = load::<Codec>(&bytes).expect("decode physical module");
+    let decoded =
+        load::<Codec>(&bytes, ContainerLimits::default()).expect("decode physical module");
     assert!(matches!(
         ModuleVerifier::new([DialectRequirement::new("admission", 1, 0)]).admit(decoded),
         Err(weavy::module::AdmissionError::InvalidConstantId { .. })

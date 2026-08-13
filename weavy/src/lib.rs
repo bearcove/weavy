@@ -23,7 +23,7 @@ pub use exec::{
 pub use module::{
     CanonicalNameError, FeatureDescriptor, FeatureId, FeatureNamespace, FeatureRequirement,
     FeatureSupport, FeatureSupportError, PolicyDescriptor, PolicyHistoryError, PolicyKey,
-    PolicyRequirement, PolicyVersion,
+    PolicyRequirement, PolicyVersion, RuntimeSemanticSupport, RuntimeSemanticSupportError,
 };
 pub use task::StructuralFieldSource;
 pub use verified::{
