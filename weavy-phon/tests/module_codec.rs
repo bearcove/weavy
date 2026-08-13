@@ -10,7 +10,10 @@ use weavy::module::{
     StorageProfile, WeavyModule,
 };
 use weavy::{BlockRef, DenseLowered};
-use weavy_phon::{CodecError, IntrinsicCodec, inspect, load, load_borrowed, save};
+use weavy_phon::{
+    CodecError, ImageId, IntrinsicCodec, PayloadIntegrityTag, inspect, inspect_structure, load,
+    load_borrowed, save,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TestIntrinsic {
@@ -235,6 +238,107 @@ fn inspect_reports_discoverable_module_facts() {
             .sections
             .iter()
             .any(|section| section.name == "constant_range.0")
+    );
+}
+
+#[test]
+fn saved_image_reports_distinct_physical_identities() {
+    let bytes = save::<TestCodec>(&fixture()).expect("save");
+    let expected_payload_tag = blake3::hash(&bytes[64..]);
+    let expected_image_id = blake3::hash(&bytes);
+
+    let report = inspect(&bytes).expect("inspect");
+    assert_eq!(
+        report.payload_integrity_tag,
+        PayloadIntegrityTag::from_bytes(
+            expected_payload_tag.as_bytes()[..16]
+                .try_into()
+                .expect("tag length"),
+        )
+    );
+    assert_eq!(
+        report.image_id,
+        ImageId::from_bytes(*expected_image_id.as_bytes())
+    );
+    assert_eq!(report.payload_integrity_tag.as_bytes(), &bytes[48..64]);
+
+    let mut with_trailing_byte = bytes.clone();
+    with_trailing_byte.push(0);
+    assert!(matches!(
+        inspect_structure(&with_trailing_byte),
+        Err(CodecError::Truncated { needed, actual })
+            if needed == bytes.len() && actual == with_trailing_byte.len()
+    ));
+}
+
+#[test]
+fn image_id_covers_header_while_payload_tag_does_not() {
+    let bytes = save::<TestCodec>(&fixture()).expect("save");
+    let original = inspect_structure(&bytes).expect("structural inspection");
+
+    let mut changed_header = bytes.clone();
+    changed_header[13] = 1;
+
+    let changed_image_id = ImageId::from_bytes(*blake3::hash(&changed_header).as_bytes());
+    let changed_payload_tag = PayloadIntegrityTag::from_bytes(
+        blake3::hash(&changed_header[64..]).as_bytes()[..16]
+            .try_into()
+            .expect("tag length"),
+    );
+    assert_eq!(changed_payload_tag, original.payload_integrity_tag);
+    assert_ne!(changed_image_id, original.image_id);
+    assert!(matches!(
+        inspect_structure(&changed_header),
+        Err(CodecError::MalformedHeader)
+    ));
+}
+
+#[test]
+fn payload_changes_invalidate_the_integrity_tag() {
+    let mut bytes = save::<TestCodec>(&fixture()).expect("save");
+    let original_tag = inspect_structure(&bytes)
+        .expect("structural inspection")
+        .payload_integrity_tag;
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x80;
+
+    let actual = PayloadIntegrityTag::from_bytes(
+        blake3::hash(&bytes[64..]).as_bytes()[..16]
+            .try_into()
+            .expect("tag length"),
+    );
+    assert_ne!(actual, original_tag);
+    assert!(matches!(
+        inspect_structure(&bytes),
+        Err(CodecError::IntegrityMismatch { .. })
+    ));
+}
+
+#[test]
+fn structural_inspection_does_not_decode_semantic_payloads() {
+    let mut bytes = save::<TestCodec>(&fixture()).expect("save");
+    let report = inspect(&bytes).expect("semantic inspection");
+    let manifest = report
+        .sections
+        .iter()
+        .find(|section| section.name == "manifest")
+        .expect("manifest section");
+    bytes[manifest.offset as usize] ^= 0x80;
+    rehash(&mut bytes);
+
+    let structural = inspect_structure(&bytes).expect("structural inspection");
+    assert_eq!(structural.sections, report.sections);
+    assert_eq!(
+        structural.image_id,
+        ImageId::from_bytes(*blake3::hash(&bytes).as_bytes())
+    );
+    assert!(
+        inspect(&bytes).is_err(),
+        "semantic inspection accepted payload"
+    );
+    assert!(
+        load::<TestCodec>(&bytes).is_err(),
+        "structural inspection conferred admission authority"
     );
 }
 

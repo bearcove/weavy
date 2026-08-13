@@ -38,6 +38,48 @@ const MAX_DIRECTORY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SECTION_COUNT: usize = 1 << 16;
 const MIN_DIRECTORY_ENTRY_BYTES: usize = 73;
 
+/// Truncated payload-integrity digest stored in the format-1.0 header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PayloadIntegrityTag([u8; 16]);
+
+impl PayloadIntegrityTag {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; 16] {
+        self.0
+    }
+}
+
+/// Full BLAKE3 digest of the exact complete received module image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImageId([u8; 32]);
+
+impl ImageId {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
 /// Intrinsic-specific durable byte encoding.
 pub trait IntrinsicCodec {
     type Intrinsic;
@@ -72,16 +114,32 @@ pub struct ConstantRangeReport {
     pub encoded_len: u64,
 }
 
+/// Semantic inspection facts decoded from a structurally valid image.
+///
+/// This report is descriptive only; it does not confer admission authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InspectionReport {
     pub module_name: String,
-    pub executable_identity: [u8; 16],
+    pub payload_integrity_tag: PayloadIntegrityTag,
+    pub image_id: ImageId,
     pub dialects: Vec<DialectRequirement>,
     pub sections: Vec<SectionReport>,
     pub program_op_count: usize,
     pub block_count: usize,
     pub constant_count: usize,
     pub constant_ranges: Vec<ConstantRangeReport>,
+}
+
+/// Bounded physical facts from the module header and canonical directory.
+///
+/// Structural inspection verifies framing and payload integrity but deliberately
+/// does not decode or validate semantic section payloads. Its result carries no
+/// semantic or admission authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructuralInspection {
+    pub payload_integrity_tag: PayloadIntegrityTag,
+    pub image_id: ImageId,
+    pub sections: Vec<SectionReport>,
 }
 
 /// One validated typed range borrowed directly from the module image.
@@ -331,8 +389,8 @@ pub fn save<C: IntrinsicCodec>(module: &WeavyModule<C::Intrinsic>) -> Result<Vec
         let offset = section.offset as usize;
         bytes[offset..offset + payload.len()].copy_from_slice(&payload);
     }
-    let identity = executable_identity(&bytes[HEADER_SIZE..]);
-    bytes[48..64].copy_from_slice(&identity);
+    let payload_integrity_tag = payload_integrity_tag(&bytes[HEADER_SIZE..]);
+    bytes[48..64].copy_from_slice(payload_integrity_tag.as_bytes());
     Ok(bytes)
 }
 
@@ -388,6 +446,7 @@ pub fn load_borrowed<C: IntrinsicCodec>(
     })
 }
 
+/// Inspect decoded module facts without admitting the module for execution.
 pub fn inspect(bytes: &[u8]) -> Result<InspectionReport, CodecError> {
     let parsed = parse_container(bytes)?;
     let schemas = decode_schema_bundle(parsed.section(SECTION_SCHEMAS)?)?;
@@ -412,7 +471,8 @@ pub fn inspect(bytes: &[u8]) -> Result<InspectionReport, CodecError> {
         .collect();
     Ok(InspectionReport {
         module_name: manifest.name().to_owned(),
-        executable_identity: parsed.identity,
+        payload_integrity_tag: parsed.payload_integrity_tag,
+        image_id: parsed.image_id,
         dialects: manifest.dialects().to_vec(),
         sections: parsed.sections,
         program_op_count,
@@ -422,10 +482,21 @@ pub fn inspect(bytes: &[u8]) -> Result<InspectionReport, CodecError> {
     })
 }
 
+/// Inspect physical image structure without decoding semantic section payloads.
+pub fn inspect_structure(bytes: &[u8]) -> Result<StructuralInspection, CodecError> {
+    let parsed = parse_container(bytes)?;
+    Ok(StructuralInspection {
+        payload_integrity_tag: parsed.payload_integrity_tag,
+        image_id: parsed.image_id,
+        sections: parsed.sections,
+    })
+}
+
 struct Parsed<'a> {
     bytes: &'a [u8],
     sections: Vec<SectionReport>,
-    identity: [u8; 16],
+    payload_integrity_tag: PayloadIntegrityTag,
+    image_id: ImageId,
 }
 impl<'a> Parsed<'a> {
     fn section(&self, kind: u32) -> Result<&'a [u8], CodecError> {
@@ -493,11 +564,13 @@ fn parse_container(bytes: &[u8]) -> Result<Parsed<'_>, CodecError> {
             file_len: bytes.len(),
         });
     }
-    let expected: [u8; 16] = bytes[48..64].try_into().expect("header length");
-    let actual = executable_identity(&bytes[HEADER_SIZE..]);
+    let expected =
+        PayloadIntegrityTag::from_bytes(bytes[48..64].try_into().expect("header length"));
+    let actual = payload_integrity_tag(&bytes[HEADER_SIZE..]);
     if expected != actual {
         return Err(CodecError::IntegrityMismatch { expected, actual });
     }
+    let image_id = image_id(bytes);
     let directory_bytes = &bytes[directory_offset..directory_end];
     let sections = decode_directory(directory_bytes)?;
     if sections.len() > MAX_SECTION_COUNT {
@@ -510,7 +583,8 @@ fn parse_container(bytes: &[u8]) -> Result<Parsed<'_>, CodecError> {
     Ok(Parsed {
         bytes,
         sections,
-        identity: expected,
+        payload_integrity_tag: expected,
+        image_id,
     })
 }
 
@@ -1357,10 +1431,16 @@ fn inspect_constants(bytes: &[u8]) -> Result<usize, CodecError> {
     Ok(count as usize)
 }
 
-fn executable_identity(bytes: &[u8]) -> [u8; 16] {
-    blake3::hash(bytes).as_bytes()[..16]
-        .try_into()
-        .expect("hash length")
+fn payload_integrity_tag(bytes: &[u8]) -> PayloadIntegrityTag {
+    PayloadIntegrityTag::from_bytes(
+        blake3::hash(bytes).as_bytes()[..16]
+            .try_into()
+            .expect("hash length"),
+    )
+}
+
+fn image_id(bytes: &[u8]) -> ImageId {
+    ImageId::from_bytes(*blake3::hash(bytes).as_bytes())
 }
 fn align_up(value: usize, alignment: usize) -> Result<usize, CodecError> {
     value
@@ -1532,8 +1612,8 @@ pub enum CodecError {
         kind: u32,
     },
     IntegrityMismatch {
-        expected: [u8; 16],
-        actual: [u8; 16],
+        expected: PayloadIntegrityTag,
+        actual: PayloadIntegrityTag,
     },
     MalformedDirectory,
     MalformedSchemas,
@@ -1609,7 +1689,8 @@ mod range_validation_tests {
                 count: 4,
                 stride: 32,
             }],
-            identity: [0; 16],
+            payload_integrity_tag: PayloadIntegrityTag::from_bytes([0; 16]),
+            image_id: ImageId::from_bytes([0; 32]),
         };
         assert!(matches!(
             validate_constant_range_sections(&parsed, &compact_registry, &aligned_registry),
