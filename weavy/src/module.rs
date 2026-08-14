@@ -635,6 +635,278 @@ impl PolicyVersion {
     }
 }
 
+/// Owner disposition for one complete policy compatibility history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PolicyDecision {
+    Approved,
+    Rejected,
+    Deferred,
+}
+
+/// Typed result of resolving one owner policy decision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicyResolution {
+    Approved(PolicyVersion),
+    Rejected { policy_key: PolicyKey, major: u16 },
+    Deferred { policy_key: PolicyKey, major: u16 },
+}
+
+/// Source row mirrored by `owner-policy-decisions.styx`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyDecisionRow {
+    pub policy_key: PolicyKey,
+    pub major: u16,
+    pub max_minor: u16,
+    pub descriptors: Vec<PolicyDescriptor>,
+    pub compatible_minor_digests: Vec<[u8; 32]>,
+    pub affected_profiles: Vec<String>,
+    pub affected_features: Vec<FeatureId>,
+    pub decision: PolicyDecision,
+    pub approval_reference: Arc<str>,
+}
+
+/// One immutable owner decision over a complete policy history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyDecisionRecord {
+    policy_key: PolicyKey,
+    major: u16,
+    max_minor: u16,
+    descriptors: Vec<PolicyDescriptor>,
+    compatible_minor_digests: Vec<[u8; 32]>,
+    affected_profiles: Vec<String>,
+    affected_features: Vec<FeatureId>,
+    decision: PolicyDecision,
+    approval_reference: Arc<str>,
+    resolution: PolicyResolution,
+}
+
+impl PolicyDecisionRecord {
+    pub fn new(mut row: PolicyDecisionRow) -> Result<Self, PolicyDecisionRecordError> {
+        let version = PolicyVersion::from_descriptors(row.descriptors.clone())?;
+        if version.policy_key() != &row.policy_key {
+            return Err(PolicyDecisionRecordError::DeclaredPolicyKeyMismatch);
+        }
+        if version.major() != row.major {
+            return Err(PolicyDecisionRecordError::DeclaredMajorMismatch {
+                declared: row.major,
+                derived: version.major(),
+            });
+        }
+        if version.max_minor() != row.max_minor {
+            return Err(PolicyDecisionRecordError::DeclaredMaxMinorMismatch {
+                declared: row.max_minor,
+                derived: version.max_minor(),
+            });
+        }
+        if row.compatible_minor_digests.len() != version.compatible_minor_digests().len() {
+            return Err(
+                PolicyDecisionRecordError::CompatibleMinorDigestCountMismatch {
+                    declared: row.compatible_minor_digests.len(),
+                    derived: version.compatible_minor_digests().len(),
+                },
+            );
+        }
+        for (minor, (declared, derived)) in row
+            .compatible_minor_digests
+            .iter()
+            .zip(version.compatible_minor_digests())
+            .enumerate()
+        {
+            if declared != derived {
+                return Err(PolicyDecisionRecordError::CompatibleMinorDigestMismatch {
+                    minor: u16::try_from(minor).expect("validated policy history length"),
+                });
+            }
+        }
+        row.affected_profiles.sort_unstable();
+        if let Some(index) = first_duplicate_index(&row.affected_profiles) {
+            return Err(PolicyDecisionRecordError::DuplicateAffectedProfile { index });
+        }
+        row.affected_features.sort_unstable();
+        if let Some(index) = first_duplicate_index(&row.affected_features) {
+            return Err(PolicyDecisionRecordError::DuplicateAffectedFeature { index });
+        }
+        if row.approval_reference.is_empty() {
+            return Err(PolicyDecisionRecordError::EmptyApprovalReference);
+        }
+        let resolution = match row.decision {
+            PolicyDecision::Approved => PolicyResolution::Approved(version),
+            PolicyDecision::Rejected => PolicyResolution::Rejected {
+                policy_key: row.policy_key.clone(),
+                major: row.major,
+            },
+            PolicyDecision::Deferred => PolicyResolution::Deferred {
+                policy_key: row.policy_key.clone(),
+                major: row.major,
+            },
+        };
+        Ok(Self {
+            policy_key: row.policy_key,
+            major: row.major,
+            max_minor: row.max_minor,
+            descriptors: row.descriptors,
+            compatible_minor_digests: row.compatible_minor_digests,
+            affected_profiles: row.affected_profiles,
+            affected_features: row.affected_features,
+            decision: row.decision,
+            approval_reference: row.approval_reference,
+            resolution,
+        })
+    }
+
+    #[must_use]
+    pub const fn resolution(&self) -> &PolicyResolution {
+        &self.resolution
+    }
+    #[must_use]
+    pub const fn policy_key(&self) -> &PolicyKey {
+        &self.policy_key
+    }
+    #[must_use]
+    pub const fn major(&self) -> u16 {
+        self.major
+    }
+    #[must_use]
+    pub const fn max_minor(&self) -> u16 {
+        self.max_minor
+    }
+    #[must_use]
+    pub fn descriptors(&self) -> &[PolicyDescriptor] {
+        &self.descriptors
+    }
+    #[must_use]
+    pub fn compatible_minor_digests(&self) -> &[[u8; 32]] {
+        &self.compatible_minor_digests
+    }
+    #[must_use]
+    pub fn affected_profiles(&self) -> &[String] {
+        &self.affected_profiles
+    }
+    #[must_use]
+    pub fn affected_features(&self) -> &[FeatureId] {
+        &self.affected_features
+    }
+    #[must_use]
+    pub const fn decision(&self) -> PolicyDecision {
+        self.decision
+    }
+    #[must_use]
+    pub fn approval_reference(&self) -> &str {
+        &self.approval_reference
+    }
+}
+
+/// Why a source owner-policy row disagreed with its descriptor authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicyDecisionRecordError {
+    History(PolicyHistoryError),
+    DeclaredPolicyKeyMismatch,
+    DeclaredMajorMismatch { declared: u16, derived: u16 },
+    DeclaredMaxMinorMismatch { declared: u16, derived: u16 },
+    CompatibleMinorDigestCountMismatch { declared: usize, derived: usize },
+    CompatibleMinorDigestMismatch { minor: u16 },
+    DuplicateAffectedProfile { index: usize },
+    DuplicateAffectedFeature { index: usize },
+    EmptyApprovalReference,
+}
+
+fn first_duplicate_index<T: PartialEq>(values: &[T]) -> Option<usize> {
+    values
+        .windows(2)
+        .position(|pair| pair[0] == pair[1])
+        .map(|index| index + 1)
+}
+
+impl From<PolicyHistoryError> for PolicyDecisionRecordError {
+    fn from(error: PolicyHistoryError) -> Self {
+        Self::History(error)
+    }
+}
+
+impl fmt::Display for PolicyDecisionRecordError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid owner policy decision row: {self:?}")
+    }
+}
+
+impl std::error::Error for PolicyDecisionRecordError {}
+
+/// Canonically ordered owner authority with exactly one row per policy major.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PolicyDecisionAuthority {
+    records: Vec<PolicyDecisionRecord>,
+}
+
+impl PolicyDecisionAuthority {
+    pub fn new(
+        records: impl IntoIterator<Item = PolicyDecisionRecord>,
+    ) -> Result<Self, PolicyDecisionAuthorityError> {
+        let mut records = records.into_iter().collect::<Vec<_>>();
+        records.sort_unstable_by(|left, right| {
+            left.policy_key()
+                .cmp(right.policy_key())
+                .then_with(|| left.major().cmp(&right.major()))
+        });
+        for (first_index, adjacent) in records.windows(2).enumerate() {
+            if adjacent[0].policy_key() == adjacent[1].policy_key()
+                && adjacent[0].major() == adjacent[1].major()
+            {
+                return Err(PolicyDecisionAuthorityError {
+                    policy_key: adjacent[0].policy_key().clone(),
+                    major: adjacent[0].major(),
+                    first_index,
+                    second_index: first_index + 1,
+                });
+            }
+        }
+        Ok(Self { records })
+    }
+
+    #[must_use]
+    pub fn records(&self) -> &[PolicyDecisionRecord] {
+        &self.records
+    }
+}
+
+/// Duplicate owner authority for one canonical policy key and major.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyDecisionAuthorityError {
+    policy_key: PolicyKey,
+    major: u16,
+    first_index: usize,
+    second_index: usize,
+}
+
+impl PolicyDecisionAuthorityError {
+    #[must_use]
+    pub const fn policy_key(&self) -> &PolicyKey {
+        &self.policy_key
+    }
+
+    #[must_use]
+    pub const fn major(&self) -> u16 {
+        self.major
+    }
+
+    #[must_use]
+    pub const fn first_index(&self) -> usize {
+        self.first_index
+    }
+
+    #[must_use]
+    pub const fn second_index(&self) -> usize {
+        self.second_index
+    }
+}
+
+impl fmt::Display for PolicyDecisionAuthorityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "duplicate owner policy authority: {self:?}")
+    }
+}
+
+impl std::error::Error for PolicyDecisionAuthorityError {}
+
 /// Immutable semantic authority available to one runtime.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSemanticSupport {

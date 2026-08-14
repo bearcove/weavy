@@ -270,6 +270,7 @@ impl ByteBudgets {
         Ok(owned)
     }
 }
+
 /// Truncated payload-integrity digest stored in the format-1.0 header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PayloadIntegrityTag([u8; 16]);
