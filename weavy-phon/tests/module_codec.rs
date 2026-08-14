@@ -1,133 +1,185 @@
+#[path = "../fixture-support/mod.rs"]
+mod support;
+
 use facet_value::{VArray, VObject, VString, Value};
-use phon_schema::{
-    Field, Primitive, Schema, SchemaId, SchemaKind, SchemaRef, primitive_id, resolve_ids,
-};
-use phon_storage::{AlignedRegistry, AlignedWriter};
+use phon_storage::{AlignedRegistry, AlignedWriter, DenseRangeWriter, compact};
+use weavy::DenseLowered;
 use weavy::ir::{ControlOp, WeavyOp};
 use weavy::module::{
-    Constant, ConstantId, ConstantPool, ConstantRange, ConstantRangeId, ConstantRangeReference,
-    ConstantReference, DialectRequirement, IntrinsicContract, ModuleManifest, ModuleVerifier,
-    StorageProfile, WeavyModule,
+    Constant, ConstantId, ConstantPool, ConstantRange, ConstantRangeId, DialectRequirement,
+    ModuleManifest, ModuleVerifier, StorageProfile, WeavyModule,
 };
-use weavy::{BlockRef, DenseLowered};
 use weavy_phon::{
-    CodecError, ContainerLimits, ImageId, IntrinsicCodec, PayloadIntegrityTag, inspect,
-    inspect_structure, load, load_borrowed, save,
+    CodecError, ContainerLimits, ImageId, PayloadIntegrityTag, inspect, inspect_structure, load,
+    load_borrowed, save,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TestIntrinsic {
-    constant: ConstantId,
-    range: ConstantRangeId,
-}
+use support::{TestCodec, TestIntrinsic, aligned_rows, fixture, logical_rows, range_schema};
 
-impl IntrinsicContract for TestIntrinsic {
-    fn constant_references(&self, visit: &mut dyn FnMut(ConstantReference)) {
-        visit(ConstantReference::new(self.constant, 0x42));
-    }
-
-    fn constant_range_references(&self, visit: &mut dyn FnMut(ConstantRangeReference)) {
-        visit(ConstantRangeReference::new(
-            self.range,
-            range_schema().1,
-            StorageProfile::Aligned,
-        ));
-    }
-}
-
-struct TestCodec;
-
-impl IntrinsicCodec for TestCodec {
-    type Intrinsic = TestIntrinsic;
-    const DIALECT: &'static str = "test";
-    const SCHEMA_ID: u64 = 0x7711;
-
-    fn encode(intrinsic: &Self::Intrinsic, out: &mut Vec<u8>) {
-        out.extend_from_slice(&intrinsic.constant.index().to_le_bytes());
-        out.extend_from_slice(&intrinsic.range.index().to_le_bytes());
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self::Intrinsic, CodecError> {
-        if bytes.len() != 8 {
-            return Err(CodecError::MalformedIntrinsic);
-        }
-        Ok(TestIntrinsic {
-            constant: ConstantId::new(u32::from_le_bytes(bytes[..4].try_into().expect("length"))),
-            range: ConstantRangeId::new(u32::from_le_bytes(bytes[4..].try_into().expect("length"))),
-        })
-    }
-}
-
-fn range_schema() -> (Vec<Schema>, SchemaId) {
-    let row = Schema {
-        id: SchemaId::from_raw(1),
-        type_params: Vec::new(),
-        kind: SchemaKind::Struct {
-            name: "TestRow".into(),
-            fields: vec![Field {
-                name: "value".into(),
-                schema: SchemaRef::concrete(primitive_id(Primitive::U32)),
-                required: true,
-            }],
-        },
-    };
-    let list = Schema {
-        id: SchemaId::from_raw(2),
-        type_params: Vec::new(),
-        kind: SchemaKind::List {
-            element: SchemaRef::concrete(row.id),
-        },
-    };
-    let schemas = resolve_ids(vec![row, list]);
-    let root = schemas[1].id;
-    (schemas, root)
-}
-
-fn aligned_rows() -> Vec<u8> {
-    let (schemas, root) = range_schema();
-    let registry = AlignedRegistry::new(schemas);
-    let mut rows = VArray::new();
-    for value in [1u32, 2, 3] {
-        let mut row = VObject::new();
-        row.insert(VString::new("value"), Value::from(value));
-        rows.push(row);
-    }
-    AlignedWriter::encode(&Value::from(rows), root, &registry).expect("aligned rows")
-}
-
-fn fixture() -> WeavyModule<TestIntrinsic> {
+fn module_with_range(
+    profile: StorageProfile,
+    bytes: Vec<u8>,
+    stride: u32,
+) -> WeavyModule<TestIntrinsic> {
     WeavyModule::new(
         ModuleManifest::new(
-            "codec.fixture",
+            "profile.oracle",
             [DialectRequirement::new("test", 1, 0)],
             [0],
         ),
-        DenseLowered::new(
-            vec![
-                WeavyOp::Intrinsic(TestIntrinsic {
-                    constant: ConstantId::new(0),
-                    range: ConstantRangeId::new(0),
-                }),
-                WeavyOp::Control(ControlOp::CallBlock {
-                    block: BlockRef::new(0),
-                    base_offset: 12,
-                }),
-            ],
-            vec![vec![WeavyOp::Control(ControlOp::Return)]],
-        ),
-        ConstantPool::new(vec![Constant::new(0x42, vec![1, 2, 3, 4])]),
+        DenseLowered::new(vec![WeavyOp::Control(ControlOp::Return)], Vec::new()),
+        ConstantPool::new(Vec::new()),
     )
     .with_constant_ranges(vec![
-        ConstantRange::new(
-            range_schema().0,
-            1,
-            StorageProfile::Aligned,
-            3,
-            32,
-            aligned_rows(),
-        )
-        .expect("range"),
+        ConstantRange::new(range_schema().0, 1, profile, 3, stride, bytes).expect("range"),
     ])
+}
+
+#[test]
+fn table_profiles_preserve_canonical_logical_rows() {
+    let logical = logical_rows();
+    let (schemas, root) = range_schema();
+    let compact_registry = phon_storage::compact::Registry::new(schemas.clone());
+    let aligned_registry = AlignedRegistry::new(schemas);
+
+    let compact_bytes = compact::to_bytes(&logical, root, &compact_registry).expect("compact rows");
+    let aligned_bytes =
+        AlignedWriter::encode(&logical, root, &aligned_registry).expect("aligned rows");
+    let dense_bytes =
+        DenseRangeWriter::encode(&logical, root, &aligned_registry).expect("dense rows");
+
+    let compact_image = save::<TestCodec>(&module_with_range(
+        StorageProfile::Compact,
+        compact_bytes,
+        4,
+    ))
+    .expect("compact image");
+    let aligned_image = save::<TestCodec>(&module_with_range(
+        StorageProfile::Aligned,
+        aligned_bytes,
+        32,
+    ))
+    .expect("aligned image");
+    let dense_image = save::<TestCodec>(&module_with_range(
+        StorageProfile::DenseAligned,
+        dense_bytes,
+        4,
+    ))
+    .expect("dense image");
+    let compact_id = inspect_structure(&compact_image, ContainerLimits::DEFAULT)
+        .expect("compact structure")
+        .image_id;
+    let aligned_id = inspect_structure(&aligned_image, ContainerLimits::DEFAULT)
+        .expect("aligned structure")
+        .image_id;
+    let dense_id = inspect_structure(&dense_image, ContainerLimits::DEFAULT)
+        .expect("dense structure")
+        .image_id;
+    assert_ne!(compact_id, aligned_id);
+    assert_ne!(compact_id, dense_id);
+    assert_ne!(aligned_id, dense_id);
+
+    let compact = load_borrowed::<TestCodec>(&compact_image, ContainerLimits::DEFAULT)
+        .expect("compact load")
+        .compact_value(0)
+        .expect("compact value");
+    let aligned = load_borrowed::<TestCodec>(&aligned_image, ContainerLimits::DEFAULT)
+        .expect("aligned load")
+        .aligned_document(0)
+        .expect("aligned document")
+        .to_value()
+        .expect("aligned value");
+    let dense_module =
+        load_borrowed::<TestCodec>(&dense_image, ContainerLimits::DEFAULT).expect("dense load");
+    let dense = dense_module.dense_range(0).expect("dense range");
+    let mut dense_rows = VArray::new();
+    for index in 0..dense.count() {
+        let mut row = VObject::new();
+        row.insert(
+            VString::new("value"),
+            Value::from(
+                dense
+                    .typed_row(index)
+                    .expect("dense row")
+                    .u32("value")
+                    .expect("value"),
+            ),
+        );
+        dense_rows.push(row);
+    }
+    let dense: Value = dense_rows.into();
+
+    assert_eq!(compact, logical);
+    assert_eq!(aligned, logical);
+    assert_eq!(dense, logical);
+    let canonical =
+        compact::to_bytes(&logical, root, &compact_registry).expect("canonical logical bytes");
+    for decoded in [&compact, &aligned, &dense] {
+        assert_eq!(
+            compact::to_bytes(decoded, root, &compact_registry).expect("canonical decoded rows"),
+            canonical,
+        );
+    }
+}
+
+#[test]
+fn writer_matches_known_good_format_1_image() {
+    let generated = save::<TestCodec>(&fixture()).expect("save known-good fixture");
+    let checked_in = include_bytes!("fixtures/format-1.0-known-good.weavy");
+    let report = inspect_structure(checked_in, ContainerLimits::DEFAULT)
+        .expect("known-good structural inspection");
+    assert_eq!(
+        generated, checked_in,
+        "regenerate with the dedicated fixture generator after an approved format change"
+    );
+    assert_eq!(&checked_in[..8], b"WEAVY\0\0\0");
+    assert_eq!(
+        u16::from_le_bytes(checked_in[8..10].try_into().expect("major")),
+        1
+    );
+    assert_eq!(
+        u16::from_le_bytes(checked_in[10..12].try_into().expect("minor")),
+        0
+    );
+    assert_eq!(checked_in[12], 1);
+    assert_eq!(&checked_in[13..16], &[0; 3]);
+    assert_eq!(
+        u64::from_le_bytes(checked_in[16..24].try_into().expect("length")) as usize,
+        checked_in.len()
+    );
+    assert_eq!(
+        u64::from_le_bytes(checked_in[24..32].try_into().expect("directory offset")),
+        64
+    );
+    assert_eq!(
+        u32::from_le_bytes(checked_in[40..44].try_into().expect("directory alignment")),
+        8
+    );
+    assert_eq!(
+        u32::from_le_bytes(checked_in[44..48].try_into().expect("directory kind")),
+        1
+    );
+    assert_eq!(
+        report
+            .sections
+            .iter()
+            .map(|section| section.kind)
+            .collect::<Vec<_>>(),
+        [2, 3, 4, 5, 0x1000],
+    );
+    assert_eq!(
+        report.payload_integrity_tag,
+        PayloadIntegrityTag::from_bytes([
+            56, 180, 132, 25, 27, 182, 111, 117, 36, 142, 182, 144, 170, 158, 121, 159,
+        ]),
+    );
+    assert_eq!(
+        report.image_id,
+        ImageId::from_bytes([
+            211, 49, 174, 171, 242, 56, 93, 119, 172, 41, 24, 204, 95, 182, 181, 108, 58, 152, 211,
+            69, 157, 114, 148, 127, 180, 89, 166, 195, 166, 196, 149, 117,
+        ]),
+    );
 }
 #[test]
 fn weavy_bytes_round_trip_deterministically() {
@@ -151,10 +203,10 @@ fn large_constant_round_trips_deterministically() {
             [0],
         ),
         DenseLowered::new(
-            vec![WeavyOp::Intrinsic(TestIntrinsic {
-                constant: ConstantId::new(0),
-                range: ConstantRangeId::new(0),
-            })],
+            vec![WeavyOp::Intrinsic(TestIntrinsic::new(
+                ConstantId::new(0),
+                ConstantRangeId::new(0),
+            ))],
             Vec::new(),
         ),
         ConstantPool::new(vec![Constant::new(0x42, payload)]),
@@ -435,10 +487,10 @@ fn borrowed_dense_range_keeps_fixed_rows_in_module_bytes() {
     let module = WeavyModule::new(
         ModuleManifest::new("dense", [DialectRequirement::new("test", 1, 0)], [0]),
         DenseLowered::new(
-            vec![WeavyOp::Intrinsic(TestIntrinsic {
-                constant: ConstantId::new(0),
-                range: ConstantRangeId::new(0),
-            })],
+            vec![WeavyOp::Intrinsic(TestIntrinsic::new(
+                ConstantId::new(0),
+                ConstantRangeId::new(0),
+            ))],
             Vec::new(),
         ),
         ConstantPool::new(vec![Constant::new(0x42, vec![1])]),
@@ -470,10 +522,10 @@ fn borrowed_dense_range_rejects_declared_schema_layout_mismatch() {
     let module = WeavyModule::new(
         ModuleManifest::new("dense", [DialectRequirement::new("test", 1, 0)], [0]),
         DenseLowered::new(
-            vec![WeavyOp::Intrinsic(TestIntrinsic {
-                constant: ConstantId::new(0),
-                range: ConstantRangeId::new(0),
-            })],
+            vec![WeavyOp::Intrinsic(TestIntrinsic::new(
+                ConstantId::new(0),
+                ConstantRangeId::new(0),
+            ))],
             Vec::new(),
         ),
         ConstantPool::new(vec![Constant::new(0x42, vec![1])]),
