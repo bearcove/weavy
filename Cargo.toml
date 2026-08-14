@@ -13,10 +13,10 @@ homepage = "https://github.com/bearcove/weavy"
 [workspace.dependencies]
 blake3 = { version = "1", default-features = false }
 copypatch = { path = "copypatch", version = "0.2.0-rc.4" }
-facet = { git = "https://github.com/facet-rs/facet", rev = "5705fa6c51289bea49f5729c52dc5e23cedce4f8" }
-facet-core = { git = "https://github.com/facet-rs/facet", rev = "5705fa6c51289bea49f5729c52dc5e23cedce4f8" }
+facet = { git = "https://github.com/facet-rs/facet", rev = "43e100aa2287cf7f054219add5612c40e551d48e" }
+facet-core = { git = "https://github.com/facet-rs/facet", rev = "43e100aa2287cf7f054219add5612c40e551d48e" }
 object = "0.39"
-phon-schema = { git = "https://github.com/bearcove/phon", rev = "3c19df3" }
+phon-schema = { git = "https://github.com/bearcove/phon", rev = "c25a3776a093323193236bc00bed4c5ae1a0af93" }
 weavy = { path = "weavy", version = "0.2.2" }
 
 [patch."https://github.com/bearcove/weavy"]
