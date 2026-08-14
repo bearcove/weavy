@@ -21,11 +21,12 @@ pub use exec::{
     StructuralResult, TaskFault,
 };
 pub use module::{
-    CanonicalNameError, FeatureDescriptor, FeatureId, FeatureNamespace, FeatureRequirement,
-    FeatureSupport, FeatureSupportError, PolicyDecision, PolicyDecisionAuthority,
-    PolicyDecisionAuthorityError, PolicyDecisionRecord, PolicyDecisionRecordError,
-    PolicyDecisionRow, PolicyDescriptor, PolicyHistoryError, PolicyKey, PolicyRequirement,
-    PolicyResolution, PolicyVersion, RuntimeSemanticSupport, RuntimeSemanticSupportError,
+    BlockKey, CanonicalNameError, FeatureDescriptor, FeatureId, FeatureNamespace,
+    FeatureRequirement, FeatureSupport, FeatureSupportError, FunctionKey, GroupKey, InstId,
+    MemberKey, PolicyDecision, PolicyDecisionAuthority, PolicyDecisionAuthorityError,
+    PolicyDecisionRecord, PolicyDecisionRecordError, PolicyDecisionRow, PolicyDescriptor,
+    PolicyHistoryError, PolicyKey, PolicyRequirement, PolicyResolution, PolicyVersion,
+    RuntimeSemanticSupport, RuntimeSemanticSupportError, TypeDigest, TypeKeyScheme,
 };
 pub use task::StructuralFieldSource;
 pub use verified::{

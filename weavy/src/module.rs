@@ -12,6 +12,219 @@ use crate::ir::{AggregateOp, ControlOp, DenseWeavyLowered, WeavyOp};
 use phon_schema::{Schema, SchemaId};
 
 const FEATURE_ID_DOMAIN: &[u8] = b"weavy.feature.v1\0";
+const FUNCTION_KEY_DOMAIN: &[u8] = b"weavy.function-key.v1\0";
+const GROUP_KEY_DOMAIN: &[u8] = b"weavy.group-key.v1\0";
+const MEMBER_KEY_DOMAIN: &[u8] = b"weavy.member-key.v1\0";
+const BLOCK_KEY_DOMAIN: &[u8] = b"weavy.block-key.v1\0";
+
+/// Versioned nominal-key projection used by canonical semantic modules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum TypeKeyScheme {
+    NominalNameHashV1 = 0,
+}
+
+impl TypeKeyScheme {
+    #[must_use]
+    pub const fn tag(self) -> u8 {
+        self as u8
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NominalNameHashV1 => "nominal_name_hash_v1",
+        }
+    }
+}
+
+/// Stable 128-bit nominal identity for one canonical function declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FunctionKey([u8; 16]);
+
+impl FunctionKey {
+    pub fn new(canonical_name: impl AsRef<str>) -> Result<Self, CanonicalNameError> {
+        global_key(FUNCTION_KEY_DOMAIN, canonical_name.as_ref()).map(Self)
+    }
+
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; 16] {
+        self.0
+    }
+}
+
+/// Stable 128-bit nominal identity for one recursive declared type group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GroupKey([u8; 16]);
+
+impl GroupKey {
+    pub fn new(canonical_name: impl AsRef<str>) -> Result<Self, CanonicalNameError> {
+        global_key(GROUP_KEY_DOMAIN, canonical_name.as_ref()).map(Self)
+    }
+
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; 16] {
+        self.0
+    }
+}
+
+/// Stable owner-scoped 32-bit identity for one member of a recursive type group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MemberKey(u32);
+
+impl MemberKey {
+    pub fn new(
+        owner: GroupKey,
+        canonical_name: impl AsRef<str>,
+    ) -> Result<Self, CanonicalNameError> {
+        local_key(MEMBER_KEY_DOMAIN, owner.as_bytes(), canonical_name.as_ref()).map(Self)
+    }
+
+    #[must_use]
+    pub const fn from_u32(value: u32) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn from_le_bytes(bytes: [u8; 4]) -> Self {
+        Self(u32::from_le_bytes(bytes))
+    }
+
+    #[must_use]
+    pub const fn into_le_bytes(self) -> [u8; 4] {
+        self.0.to_le_bytes()
+    }
+}
+
+/// Stable owner-scoped 32-bit identity for one block in a canonical function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockKey(u32);
+
+impl BlockKey {
+    pub fn new(
+        owner: FunctionKey,
+        canonical_name: impl AsRef<str>,
+    ) -> Result<Self, CanonicalNameError> {
+        local_key(BLOCK_KEY_DOMAIN, owner.as_bytes(), canonical_name.as_ref()).map(Self)
+    }
+
+    #[must_use]
+    pub const fn from_u32(value: u32) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn from_le_bytes(bytes: [u8; 4]) -> Self {
+        Self(u32::from_le_bytes(bytes))
+    }
+
+    #[must_use]
+    pub const fn into_le_bytes(self) -> [u8; 4] {
+        self.0.to_le_bytes()
+    }
+}
+
+/// Canonical semantic instruction identity, independent of physical byte offset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InstId {
+    function: FunctionKey,
+    ordinal: u32,
+}
+
+impl InstId {
+    #[must_use]
+    pub const fn new(function: FunctionKey, ordinal: u32) -> Self {
+        Self { function, ordinal }
+    }
+
+    #[must_use]
+    pub const fn function(self) -> FunctionKey {
+        self.function
+    }
+
+    #[must_use]
+    pub const fn ordinal(self) -> u32 {
+        self.ordinal
+    }
+}
+
+/// Full cryptographic digest of one canonical recursive-type descriptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TypeDigest([u8; 32]);
+
+impl TypeDigest {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+fn global_key(domain: &[u8], canonical_name: &str) -> Result<[u8; 16], CanonicalNameError> {
+    validate_canonical_name(canonical_name)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(canonical_name.as_bytes());
+    let mut key = [0; 16];
+    key.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    Ok(key)
+}
+
+fn local_key(
+    domain: &[u8],
+    owner: &[u8; 16],
+    canonical_name: &str,
+) -> Result<u32, CanonicalNameError> {
+    validate_canonical_name(canonical_name)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(owner);
+    hasher.update(canonical_name.as_bytes());
+    Ok(u32::from_le_bytes(
+        hasher.finalize().as_bytes()[..4]
+            .try_into()
+            .expect("digest prefix length"),
+    ))
+}
 
 /// Closed semantic-feature namespaces with their frozen profile sort tags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
