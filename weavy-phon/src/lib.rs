@@ -12,7 +12,7 @@ use phon_storage::{AlignedDocument, AlignedRegistry, DenseRange, compact};
 use weavy::ir::{AggregateOp, ControlOp, InitOp, MemoryOp, WeavyOp};
 use weavy::mem::{Layout, ScalarSegment};
 use weavy::module::{
-    AdmissionError, Constant, ConstantPool, ConstantRange, ConstantRangeError,
+    AdmissionError, AdmittedModule, Constant, ConstantPool, ConstantRange, ConstantRangeError,
     ConstantRangeMetadata, DialectRequirement, ModuleManifest, ModuleVerifier, StorageProfile,
     WeavyModule,
 };
@@ -45,6 +45,24 @@ pub trait IntrinsicCodec {
     const SCHEMA_ID: u64;
     fn encode(intrinsic: &Self::Intrinsic, out: &mut Vec<u8>);
     fn decode(bytes: &[u8]) -> Result<Self::Intrinsic, CodecError>;
+}
+
+#[derive(Debug)]
+pub enum AdmittedLoadError {
+    Codec(CodecError),
+    Admission(AdmissionError),
+}
+
+impl From<CodecError> for AdmittedLoadError {
+    fn from(error: CodecError) -> Self {
+        Self::Codec(error)
+    }
+}
+
+impl From<AdmissionError> for AdmittedLoadError {
+    fn from(error: AdmissionError) -> Self {
+        Self::Admission(error)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,6 +194,23 @@ impl<'a, Intrinsic: weavy::module::IntrinsicContract> BorrowedModule<'a, Intrins
             })
             .collect::<Vec<_>>();
         verifier.verify_parts(&self.manifest, &self.program, &self.constants, &ranges)
+    }
+}
+
+/// A borrowing module that has passed semantic admission checks.
+pub struct AdmittedBorrowedModule<'a, Intrinsic> {
+    module: BorrowedModule<'a, Intrinsic>,
+}
+
+impl<'a, Intrinsic: weavy::module::IntrinsicContract> AdmittedBorrowedModule<'a, Intrinsic> {
+    #[must_use]
+    pub const fn module(&self) -> &BorrowedModule<'a, Intrinsic> {
+        &self.module
+    }
+
+    #[must_use]
+    pub fn into_module(self) -> BorrowedModule<'a, Intrinsic> {
+        self.module
     }
 }
 
@@ -349,6 +384,17 @@ pub fn load<C: IntrinsicCodec>(bytes: &[u8]) -> Result<WeavyModule<C::Intrinsic>
     Ok(WeavyModule::new(manifest, program, constants).with_constant_ranges(ranges))
 }
 
+/// Load and semantically admit an owned module before exposing it for execution.
+pub fn load_admitted<C: IntrinsicCodec>(
+    bytes: &[u8],
+    verifier: &ModuleVerifier,
+) -> Result<AdmittedModule<C::Intrinsic>, AdmittedLoadError>
+where
+    C::Intrinsic: weavy::module::IntrinsicContract,
+{
+    Ok(verifier.admit(load::<C>(bytes)?)?)
+}
+
 pub fn load_borrowed<C: IntrinsicCodec>(
     bytes: &[u8],
 ) -> Result<BorrowedModule<'_, C::Intrinsic>, CodecError> {
@@ -386,6 +432,19 @@ pub fn load_borrowed<C: IntrinsicCodec>(
         aligned_registry,
         ranges,
     })
+}
+
+/// Load and semantically admit a borrowing module before exposing it for execution.
+pub fn load_borrowed_admitted<'a, C: IntrinsicCodec>(
+    bytes: &'a [u8],
+    verifier: &ModuleVerifier,
+) -> Result<AdmittedBorrowedModule<'a, C::Intrinsic>, AdmittedLoadError>
+where
+    C::Intrinsic: weavy::module::IntrinsicContract,
+{
+    let module = load_borrowed::<C>(bytes)?;
+    module.admit(verifier)?;
+    Ok(AdmittedBorrowedModule { module })
 }
 
 pub fn inspect(bytes: &[u8]) -> Result<InspectionReport, CodecError> {
