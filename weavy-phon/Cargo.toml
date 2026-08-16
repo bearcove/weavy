@@ -12,10 +12,13 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 blake3.workspace = true
+facet.workspace = true
+facet-phon.workspace = true
+facet-value.workspace = true
 weavy.workspace = true
 phon-schema.workspace = true
 phon-storage.workspace = true
-facet-value.workspace = true
+
 
 [dev-dependencies]
 blake3.workspace = true
