@@ -229,6 +229,39 @@ fn borrowed_module_reencodes_to_identical_bytes() {
 }
 
 #[test]
+fn borrowed_reencode_does_not_require_clone_intrinsics() {
+    struct NonCloneIntrinsic;
+    impl IntrinsicContract for NonCloneIntrinsic {
+        fn constant_references(&self, _: &mut dyn FnMut(ConstantReference)) {}
+    }
+    struct NonCloneCodec;
+    impl IntrinsicCodec for NonCloneCodec {
+        type Intrinsic = NonCloneIntrinsic;
+        const DIALECT: &'static str = "nonclone";
+        const SCHEMA_ID: u64 = 0;
+        fn encode(_: &NonCloneIntrinsic, _: &mut Vec<u8>) {}
+        fn decode(bytes: &[u8]) -> Result<NonCloneIntrinsic, CodecError> {
+            if bytes.is_empty() {
+                Ok(NonCloneIntrinsic)
+            } else {
+                Err(CodecError::MalformedIntrinsic)
+            }
+        }
+    }
+
+    let module = WeavyModule::new(
+        ModuleManifest::new("nonclone", [DialectRequirement::new("nonclone", 1, 0)], [0]),
+        DenseLowered::new(vec![WeavyOp::Intrinsic(NonCloneIntrinsic)], vec![]),
+        ConstantPool::new(vec![]),
+    );
+    let bytes = save::<NonCloneCodec>(&module).expect("save");
+    let borrowed = load_borrowed::<NonCloneCodec>(&bytes).expect("load borrowed");
+    assert_eq!(
+        save_borrowed::<NonCloneCodec>(&borrowed).expect("reencode"),
+        bytes
+    );
+}
+#[test]
 fn inspect_reports_discoverable_module_facts() {
     let bytes = save::<TestCodec>(&fixture()).expect("save");
     let report = inspect(&bytes).expect("inspect");
