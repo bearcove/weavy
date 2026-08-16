@@ -12,6 +12,7 @@ use weavy::module::{
 use weavy::{BlockRef, DenseLowered};
 use weavy_phon::{
     CodecError, IntrinsicCodec, inspect, load, load_borrowed, load_borrowed_admitted, save,
+    save_borrowed,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -213,6 +214,18 @@ fn borrowed_load_keeps_aligned_range_in_module_bytes() {
             .expect("u32"),
         2,
     );
+}
+
+#[test]
+fn borrowed_module_reencodes_to_identical_bytes() {
+    let first = save::<TestCodec>(&fixture()).expect("save");
+    let borrowed = load_borrowed_admitted::<TestCodec>(
+        &first,
+        &ModuleVerifier::new([DialectRequirement::new("test", 1, 0)]),
+    )
+    .expect("borrowed load and admission");
+    let second = save_borrowed::<TestCodec>(borrowed.module()).expect("save borrowed");
+    assert_eq!(second, first);
 }
 
 #[test]
