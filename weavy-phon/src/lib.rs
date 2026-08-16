@@ -1,6 +1,7 @@
 //! PHON-backed durable module codec for Weavy.
 
 use core::fmt;
+use std::borrow::Cow;
 
 use facet_value::{VArray, VObject, VString, Value};
 use phon_schema::{
@@ -123,6 +124,7 @@ pub struct BorrowedModule<'a, Intrinsic> {
     manifest: ModuleManifest,
     program: DenseLowered<WeavyOp<BlockRef, Intrinsic>>,
     constants: ConstantPool,
+    schema_bytes: &'a [u8],
     compact_registry: Registry,
     aligned_registry: AlignedRegistry,
     ranges: Vec<BorrowedConstantRange<'a>>,
@@ -197,46 +199,6 @@ impl<'a, Intrinsic: weavy::module::IntrinsicContract> BorrowedModule<'a, Intrins
     }
 }
 
-impl<'a, Intrinsic> BorrowedModule<'a, Intrinsic>
-where
-    Intrinsic: Clone + weavy::module::IntrinsicContract,
-{
-    /// Materialize this borrowing view as an owned semantic module.
-    pub fn to_owned_module(&self) -> Result<WeavyModule<Intrinsic>, CodecError> {
-        let ranges = self
-            .ranges
-            .iter()
-            .map(|range| {
-                let mut schemas = Vec::new();
-                collect_schema_closure(
-                    range.report.schema_id,
-                    &self.compact_registry,
-                    &mut schemas,
-                )?;
-                let root_index = schemas
-                    .iter()
-                    .position(|schema| schema.id == range.report.schema_id)
-                    .ok_or(CodecError::MalformedSchemas)?;
-                ConstantRange::new(
-                    schemas,
-                    root_index,
-                    range.report.profile,
-                    range.report.count,
-                    range.report.stride,
-                    range.bytes.to_vec(),
-                )
-                .map_err(CodecError::ConstantRange)
-            })
-            .collect::<Result<Vec<_>, CodecError>>()?;
-        Ok(WeavyModule::new(
-            self.manifest.clone(),
-            self.program.clone(),
-            self.constants.clone(),
-        )
-        .with_constant_ranges(ranges))
-    }
-}
-
 /// A borrowing module that has passed semantic admission checks.
 pub struct AdmittedBorrowedModule<'a, Intrinsic> {
     module: BorrowedModule<'a, Intrinsic>,
@@ -254,85 +216,129 @@ impl<'a, Intrinsic: weavy::module::IntrinsicContract> AdmittedBorrowedModule<'a,
     }
 }
 
-pub fn save<C: IntrinsicCodec>(module: &WeavyModule<C::Intrinsic>) -> Result<Vec<u8>, CodecError> {
-    let manifest = encode_manifest(module.manifest());
-    let schemas = encode_schema_bundle(module.constant_ranges());
-    let program = encode_program::<C>(module.program())?;
-    let constants = encode_constants(module.constants())?;
-    for range in module.constant_ranges() {
-        if range.profile() == StorageProfile::DenseAligned {
-            let registry =
-                AlignedRegistry::try_new(range.schemas().to_vec()).map_err(CodecError::Phon)?;
-            let dense = DenseRange::parse(range.bytes(), range.schema_id(), &registry)
-                .map_err(CodecError::Aligned)?;
-            if dense.count() != range.count() as usize || dense.stride() != range.stride() as usize
-            {
-                return Err(CodecError::MalformedConstantRange);
-            }
-        }
-    }
+struct Payload<'a> {
+    name: String,
+    kind: u32,
+    schema_id: u64,
+    bytes: Cow<'a, [u8]>,
+    profile: Option<StorageProfile>,
+    count: u32,
+    stride: u32,
+}
 
-    let mut payloads = vec![
-        (
-            "manifest".to_owned(),
-            SECTION_MANIFEST,
-            1u64,
-            manifest,
-            None,
-            0,
-            0,
-        ),
-        (
-            "schemas".to_owned(),
-            SECTION_SCHEMAS,
-            1u64,
-            schemas,
-            None,
-            0,
-            0,
-        ),
-        (
-            "program".to_owned(),
-            SECTION_PROGRAM,
-            PROGRAM_SCHEMA_ID,
-            program,
-            None,
-            0,
-            0,
-        ),
-        (
-            "constants".to_owned(),
-            SECTION_CONSTANTS,
-            CONSTANT_DIRECTORY_SCHEMA_ID,
-            constants,
-            None,
-            0,
-            0,
-        ),
-    ];
+pub fn save<C: IntrinsicCodec>(module: &WeavyModule<C::Intrinsic>) -> Result<Vec<u8>, CodecError> {
+    for range in module.constant_ranges() {
+        validate_range_for_save(range)?;
+    }
+    let mut payloads = base_payloads::<C>(
+        module.manifest(),
+        Cow::Owned(encode_schema_bundle(module.constant_ranges())),
+        module.program(),
+        module.constants(),
+    )?;
     for (index, range) in module.constant_ranges().iter().enumerate() {
-        let kind = SECTION_CONSTANT_RANGE_BASE
-            .checked_add(u32::try_from(index).map_err(|_| CodecError::SizeOverflow)?)
-            .ok_or(CodecError::SizeOverflow)?;
-        payloads.push((
-            format!("constant_range.{index}"),
-            kind,
-            range.schema_id().as_u64(),
-            range.bytes().to_vec(),
-            Some(range.profile()),
+        payloads.push(range_payload(
+            index,
+            range.schema_id(),
+            range.bytes(),
+            range.profile(),
             range.count(),
             range.stride(),
-        ));
+        )?);
     }
+    assemble_container(payloads)
+}
+
+fn validate_range_for_save(range: &ConstantRange) -> Result<(), CodecError> {
+    if range.profile() == StorageProfile::DenseAligned {
+        let registry =
+            AlignedRegistry::try_new(range.schemas().to_vec()).map_err(CodecError::Phon)?;
+        let dense = DenseRange::parse(range.bytes(), range.schema_id(), &registry)
+            .map_err(CodecError::Aligned)?;
+        if dense.count() != range.count() as usize || dense.stride() != range.stride() as usize {
+            return Err(CodecError::MalformedConstantRange);
+        }
+    }
+    Ok(())
+}
+
+fn base_payloads<'a, C: IntrinsicCodec>(
+    manifest: &ModuleManifest,
+    schemas: Cow<'a, [u8]>,
+    program: &DenseLowered<WeavyOp<BlockRef, C::Intrinsic>>,
+    constants: &ConstantPool,
+) -> Result<Vec<Payload<'a>>, CodecError> {
+    Ok(vec![
+        Payload {
+            name: "manifest".to_owned(),
+            kind: SECTION_MANIFEST,
+            schema_id: 1,
+            bytes: Cow::Owned(encode_manifest(manifest)),
+            profile: None,
+            count: 0,
+            stride: 0,
+        },
+        Payload {
+            name: "schemas".to_owned(),
+            kind: SECTION_SCHEMAS,
+            schema_id: 1,
+            bytes: schemas,
+            profile: None,
+            count: 0,
+            stride: 0,
+        },
+        Payload {
+            name: "program".to_owned(),
+            kind: SECTION_PROGRAM,
+            schema_id: PROGRAM_SCHEMA_ID,
+            bytes: Cow::Owned(encode_program::<C>(program)?),
+            profile: None,
+            count: 0,
+            stride: 0,
+        },
+        Payload {
+            name: "constants".to_owned(),
+            kind: SECTION_CONSTANTS,
+            schema_id: CONSTANT_DIRECTORY_SCHEMA_ID,
+            bytes: Cow::Owned(encode_constants(constants)?),
+            profile: None,
+            count: 0,
+            stride: 0,
+        },
+    ])
+}
+
+fn range_payload(
+    index: usize,
+    schema_id: SchemaId,
+    bytes: &[u8],
+    profile: StorageProfile,
+    count: u32,
+    stride: u32,
+) -> Result<Payload<'_>, CodecError> {
+    Ok(Payload {
+        name: format!("constant_range.{index}"),
+        kind: SECTION_CONSTANT_RANGE_BASE
+            .checked_add(u32::try_from(index).map_err(|_| CodecError::SizeOverflow)?)
+            .ok_or(CodecError::SizeOverflow)?,
+        schema_id: schema_id.as_u64(),
+        bytes: Cow::Borrowed(bytes),
+        profile: Some(profile),
+        count,
+        stride,
+    })
+}
+
+fn assemble_container(payloads: Vec<Payload<'_>>) -> Result<Vec<u8>, CodecError> {
     let directory_placeholder = encode_directory(&[])?;
     let mut cursor = align_up(
         HEADER_SIZE + directory_placeholder.len(),
         DIRECTORY_ALIGNMENT as usize,
     )?;
     let mut sections = Vec::with_capacity(payloads.len());
-    for (name, kind, schema_id, payload, profile, count, stride) in &payloads {
+    for payload in &payloads {
         let payload_alignment = if matches!(
-            profile,
+            payload.profile,
             Some(StorageProfile::Aligned | StorageProfile::DenseAligned)
         ) {
             64
@@ -341,28 +347,28 @@ pub fn save<C: IntrinsicCodec>(module: &WeavyModule<C::Intrinsic>) -> Result<Vec
         };
         cursor = align_up(cursor, payload_alignment)?;
         sections.push(SectionReport {
-            name: name.clone(),
-            kind: *kind,
+            name: payload.name.clone(),
+            kind: payload.kind,
             offset: cursor as u64,
-            encoded_len: payload.len() as u64,
-            decoded_len: payload.len() as u64,
+            encoded_len: payload.bytes.len() as u64,
+            decoded_len: payload.bytes.len() as u64,
             alignment: payload_alignment as u32,
-            schema_id: *schema_id,
+            schema_id: payload.schema_id,
             flags: FLAG_REQUIRED,
-            profile: *profile,
-            count: *count,
-            stride: *stride,
+            profile: payload.profile,
+            count: payload.count,
+            stride: payload.stride,
         });
         cursor = cursor
-            .checked_add(payload.len())
+            .checked_add(payload.bytes.len())
             .ok_or(CodecError::SizeOverflow)?;
     }
     let mut directory = encode_directory(&sections)?;
     loop {
         let mut next = align_up(HEADER_SIZE + directory.len(), DIRECTORY_ALIGNMENT as usize)?;
-        for (section, (_, _, _, payload, profile, _, _)) in sections.iter_mut().zip(&payloads) {
+        for (section, payload) in sections.iter_mut().zip(&payloads) {
             let alignment = if matches!(
-                profile,
+                payload.profile,
                 Some(StorageProfile::Aligned | StorageProfile::DenseAligned)
             ) {
                 64
@@ -372,7 +378,7 @@ pub fn save<C: IntrinsicCodec>(module: &WeavyModule<C::Intrinsic>) -> Result<Vec
             next = align_up(next, alignment)?;
             section.offset = next as u64;
             next = next
-                .checked_add(payload.len())
+                .checked_add(payload.bytes.len())
                 .ok_or(CodecError::SizeOverflow)?;
         }
         let updated = encode_directory(&sections)?;
@@ -382,15 +388,15 @@ pub fn save<C: IntrinsicCodec>(module: &WeavyModule<C::Intrinsic>) -> Result<Vec
         }
         directory = updated;
     }
-    let file_len = sections.iter().zip(payloads.iter()).try_fold(
-        0usize,
-        |_, (section, (_, _, _, payload, _, _, _))| {
+    let file_len = sections
+        .iter()
+        .zip(&payloads)
+        .try_fold(0usize, |_, (section, payload)| {
             usize::try_from(section.offset)
                 .ok()
-                .and_then(|offset| offset.checked_add(payload.len()))
+                .and_then(|offset| offset.checked_add(payload.bytes.len()))
                 .ok_or(CodecError::SizeOverflow)
-        },
-    )?;
+        })?;
     let mut bytes = vec![0; file_len];
     bytes[..8].copy_from_slice(&MAGIC);
     bytes[8..10].copy_from_slice(&FORMAT_MAJOR.to_le_bytes());
@@ -402,9 +408,9 @@ pub fn save<C: IntrinsicCodec>(module: &WeavyModule<C::Intrinsic>) -> Result<Vec
     bytes[40..44].copy_from_slice(&DIRECTORY_ALIGNMENT.to_le_bytes());
     bytes[44..48].copy_from_slice(&DIRECTORY_SECTION_KIND.to_le_bytes());
     bytes[HEADER_SIZE..HEADER_SIZE + directory.len()].copy_from_slice(&directory);
-    for (section, (_, _, _, payload, _, _, _)) in sections.iter().zip(payloads) {
+    for (section, payload) in sections.iter().zip(payloads) {
         let offset = section.offset as usize;
-        bytes[offset..offset + payload.len()].copy_from_slice(&payload);
+        bytes[offset..offset + payload.bytes.len()].copy_from_slice(&payload.bytes);
     }
     let identity = executable_identity(&bytes[HEADER_SIZE..]);
     bytes[48..64].copy_from_slice(&identity);
@@ -429,9 +435,26 @@ pub fn save_borrowed<C: IntrinsicCodec>(
     module: &BorrowedModule<'_, C::Intrinsic>,
 ) -> Result<Vec<u8>, CodecError>
 where
-    C::Intrinsic: Clone + weavy::module::IntrinsicContract,
+    C::Intrinsic: weavy::module::IntrinsicContract,
 {
-    save::<C>(&module.to_owned_module()?)
+    let schemas = Cow::Borrowed(module.schema_bytes);
+    let mut payloads = base_payloads::<C>(
+        module.manifest(),
+        schemas,
+        module.program(),
+        module.constants(),
+    )?;
+    for (index, range) in module.constant_ranges().iter().enumerate() {
+        payloads.push(range_payload(
+            index,
+            range.report.schema_id,
+            range.bytes,
+            range.report.profile,
+            range.report.count,
+            range.report.stride,
+        )?);
+    }
+    assemble_container(payloads)
 }
 
 /// Load and semantically admit an owned module before exposing it for execution.
@@ -449,7 +472,8 @@ pub fn load_borrowed<C: IntrinsicCodec>(
     bytes: &[u8],
 ) -> Result<BorrowedModule<'_, C::Intrinsic>, CodecError> {
     let parsed = parse_container(bytes)?;
-    let schemas = decode_schema_bundle(parsed.section(SECTION_SCHEMAS)?)?;
+    let schema_bytes = parsed.section(SECTION_SCHEMAS)?;
+    let schemas = decode_schema_bundle(schema_bytes)?;
     let compact_registry = Registry::try_new(schemas.clone()).map_err(CodecError::Phon)?;
     let aligned_registry = AlignedRegistry::try_new(schemas).map_err(CodecError::Phon)?;
     validate_constant_range_sections(&parsed, &compact_registry, &aligned_registry)?;
@@ -478,6 +502,7 @@ pub fn load_borrowed<C: IntrinsicCodec>(
         manifest,
         program,
         constants,
+        schema_bytes,
         compact_registry,
         aligned_registry,
         ranges,
@@ -879,6 +904,7 @@ fn decode_directory(bytes: &[u8]) -> Result<Vec<SectionReport>, CodecError> {
     }
     Ok(sections)
 }
+
 fn object_value<'a>(object: &'a VObject, name: &str) -> Result<&'a Value, CodecError> {
     object
         .get(&VString::new(name))
