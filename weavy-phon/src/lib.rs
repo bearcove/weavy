@@ -4,8 +4,8 @@ use core::fmt;
 
 use facet_value::{VArray, VObject, VString, Value};
 use phon_schema::{
-    Field, Primitive, Schema, SchemaId, SchemaKind, SchemaRef, primitive_id, resolve_ids,
-    schema_from_bytes, schema_to_bytes,
+    DecodeLimits, Field, Primitive, Schema, SchemaId, SchemaKind, SchemaRef, primitive_id,
+    resolve_ids, schema_from_bytes, schema_to_bytes,
 };
 use phon_storage::compact::Registry;
 use phon_storage::{AlignedDocument, AlignedRegistry, DenseRange, compact};
@@ -861,7 +861,9 @@ fn decode_schema_bundle(bytes: &[u8]) -> Result<Vec<Schema>, CodecError> {
         .try_reserve_exact(count)
         .map_err(|_| CodecError::AdmissionLimitExceeded)?;
     for _ in 0..count {
-        schemas.push(schema_from_bytes(r.bytes()?).map_err(|_| CodecError::MalformedSchemas)?);
+        let (schema, _) = schema_from_bytes(r.bytes()?, DecodeLimits::DEFAULT)
+            .map_err(|_| CodecError::MalformedSchemas)?;
+        schemas.push(schema);
     }
     r.finish()?;
     Ok(schemas)
