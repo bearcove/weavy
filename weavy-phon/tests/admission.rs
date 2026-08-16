@@ -4,7 +4,9 @@ use weavy::module::{
     Constant, ConstantId, ConstantPool, ConstantReference, DialectRequirement, IntrinsicContract,
     ModuleManifest, ModuleVerifier, WeavyModule,
 };
-use weavy_phon::{CodecError, IntrinsicCodec, load, save};
+use weavy_phon::{
+    AdmittedLoadError, CodecError, IntrinsicCodec, load_admitted, load_borrowed_admitted, save,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Intrinsic(ConstantId);
@@ -45,9 +47,61 @@ fn bad_constant_id_is_rejected_before_execution() {
         ConstantPool::new(vec![Constant::new(7, vec![])]),
     );
     let bytes = save::<Codec>(&module).expect("save");
-    let decoded = load::<Codec>(&bytes).expect("decode physical module");
     assert!(matches!(
-        ModuleVerifier::new([DialectRequirement::new("admission", 1, 0)]).admit(decoded),
-        Err(weavy::module::AdmissionError::InvalidConstantId { .. })
+        load_admitted::<Codec>(
+            &bytes,
+            &ModuleVerifier::new([DialectRequirement::new("admission", 1, 0)]),
+        ),
+        Err(AdmittedLoadError::Admission(
+            weavy::module::AdmissionError::InvalidConstantId { .. }
+        ))
     ));
+}
+
+#[test]
+fn admitted_load_returns_execution_ready_module() {
+    let module = WeavyModule::new(
+        ModuleManifest::new(
+            "good.constant",
+            [DialectRequirement::new("admission", 1, 0)],
+            [0],
+        ),
+        DenseLowered::new(
+            vec![WeavyOp::Intrinsic(Intrinsic(ConstantId::new(0)))],
+            vec![],
+        ),
+        ConstantPool::new(vec![Constant::new(7, vec![])]),
+    );
+    let bytes = save::<Codec>(&module).expect("save");
+    let admitted = load_admitted::<Codec>(
+        &bytes,
+        &ModuleVerifier::new([DialectRequirement::new("admission", 1, 0)]),
+    )
+    .expect("load and admit");
+    assert_eq!(admitted.module(), &module);
+}
+
+#[test]
+fn admitted_borrowed_load_preserves_module_borrowing() {
+    let module = WeavyModule::new(
+        ModuleManifest::new(
+            "good.borrowed",
+            [DialectRequirement::new("admission", 1, 0)],
+            [0],
+        ),
+        DenseLowered::new(
+            vec![WeavyOp::Intrinsic(Intrinsic(ConstantId::new(0)))],
+            vec![],
+        ),
+        ConstantPool::new(vec![Constant::new(7, vec![])]),
+    );
+    let bytes = save::<Codec>(&module).expect("save");
+    let admitted = load_borrowed_admitted::<Codec>(
+        &bytes,
+        &ModuleVerifier::new([DialectRequirement::new("admission", 1, 0)]),
+    )
+    .expect("borrowed load and admit");
+    assert_eq!(admitted.module().manifest(), module.manifest());
+    assert_eq!(admitted.module().program(), module.program());
+    assert_eq!(admitted.module().constants(), module.constants());
 }

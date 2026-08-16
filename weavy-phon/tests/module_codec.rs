@@ -10,7 +10,9 @@ use weavy::module::{
     StorageProfile, WeavyModule,
 };
 use weavy::{BlockRef, DenseLowered};
-use weavy_phon::{CodecError, IntrinsicCodec, inspect, load, load_borrowed, save};
+use weavy_phon::{
+    CodecError, IntrinsicCodec, inspect, load, load_borrowed, load_borrowed_admitted, save,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TestIntrinsic {
@@ -187,12 +189,12 @@ fn borrowed_load_keeps_aligned_range_in_module_bytes() {
         .iter()
         .find(|section| section.name == "constant_range.0")
         .expect("range section");
-    let borrowed = load_borrowed::<TestCodec>(&first).expect("borrowed load");
-    borrowed
-        .admit(&ModuleVerifier::new([DialectRequirement::new(
-            "test", 1, 0,
-        )]))
-        .expect("borrowed admission");
+    let borrowed = load_borrowed_admitted::<TestCodec>(
+        &first,
+        &ModuleVerifier::new([DialectRequirement::new("test", 1, 0)]),
+    )
+    .expect("borrowed load and admission");
+    let borrowed = borrowed.module();
     let range = &borrowed.constant_ranges()[0];
     assert_eq!(
         range.bytes().as_ptr(),
