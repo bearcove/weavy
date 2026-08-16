@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["copypatch", "taxon", "weavy", "weavy-phon"]
+members = ["copypatch", "weavy", "weavy-phon"]
 exclude = ["fable"]
 
 [workspace.package]
@@ -16,17 +16,18 @@ copypatch = { path = "copypatch", version = "0.2.0-rc.4" }
 facet = { git = "https://github.com/facet-rs/facet", rev = "5705fa6c51289bea49f5729c52dc5e23cedce4f8" }
 facet-core = { git = "https://github.com/facet-rs/facet", rev = "5705fa6c51289bea49f5729c52dc5e23cedce4f8" }
 object = "0.39"
-phon-schema = { git = "https://github.com/bearcove/phon", rev = "3c19df3" }
+phon-schema = { git = "https://github.com/bearcove/phon", rev = "02e67bf5f89f826a127bfeb3f51e6a18ac177a6b" }
+phon-storage = { git = "https://github.com/bearcove/phon", rev = "02e67bf5f89f826a127bfeb3f51e6a18ac177a6b" }
 weavy = { path = "weavy", version = "0.2.2" }
 
 [patch."https://github.com/bearcove/weavy"]
 copypatch = { path = "copypatch" }
-taxon = { path = "taxon" }
+taxon = { git = "https://github.com/bearcove/taxon", rev = "c0369bcfceb8e85ccc433bb6478161cd8124c7e3" }
 weavy = { path = "weavy" }
 
 [patch.crates-io]
 copypatch = { path = "copypatch" }
-taxon = { path = "taxon" }
+taxon = { git = "https://github.com/bearcove/taxon", rev = "c0369bcfceb8e85ccc433bb6478161cd8124c7e3" }
 weavy = { path = "weavy" }
 
 
