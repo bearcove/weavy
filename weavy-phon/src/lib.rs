@@ -197,6 +197,46 @@ impl<'a, Intrinsic: weavy::module::IntrinsicContract> BorrowedModule<'a, Intrins
     }
 }
 
+impl<'a, Intrinsic> BorrowedModule<'a, Intrinsic>
+where
+    Intrinsic: Clone + weavy::module::IntrinsicContract,
+{
+    /// Materialize this borrowing view as an owned semantic module.
+    pub fn to_owned_module(&self) -> Result<WeavyModule<Intrinsic>, CodecError> {
+        let ranges = self
+            .ranges
+            .iter()
+            .map(|range| {
+                let mut schemas = Vec::new();
+                collect_schema_closure(
+                    range.report.schema_id,
+                    &self.compact_registry,
+                    &mut schemas,
+                )?;
+                let root_index = schemas
+                    .iter()
+                    .position(|schema| schema.id == range.report.schema_id)
+                    .ok_or(CodecError::MalformedSchemas)?;
+                ConstantRange::new(
+                    schemas,
+                    root_index,
+                    range.report.profile,
+                    range.report.count,
+                    range.report.stride,
+                    range.bytes.to_vec(),
+                )
+                .map_err(CodecError::ConstantRange)
+            })
+            .collect::<Result<Vec<_>, CodecError>>()?;
+        Ok(WeavyModule::new(
+            self.manifest.clone(),
+            self.program.clone(),
+            self.constants.clone(),
+        )
+        .with_constant_ranges(ranges))
+    }
+}
+
 /// A borrowing module that has passed semantic admission checks.
 pub struct AdmittedBorrowedModule<'a, Intrinsic> {
     module: BorrowedModule<'a, Intrinsic>,
@@ -382,6 +422,16 @@ pub fn load<C: IntrinsicCodec>(bytes: &[u8]) -> Result<WeavyModule<C::Intrinsic>
     let constants = decode_constants(parsed.section(SECTION_CONSTANTS)?)?;
     let ranges = decode_constant_ranges(&parsed, &compact_registry)?;
     Ok(WeavyModule::new(manifest, program, constants).with_constant_ranges(ranges))
+}
+
+/// Deterministically re-encode a borrowing module view.
+pub fn save_borrowed<C: IntrinsicCodec>(
+    module: &BorrowedModule<'_, C::Intrinsic>,
+) -> Result<Vec<u8>, CodecError>
+where
+    C::Intrinsic: Clone + weavy::module::IntrinsicContract,
+{
+    save::<C>(&module.to_owned_module()?)
 }
 
 /// Load and semantically admit an owned module before exposing it for execution.
