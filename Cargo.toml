@@ -13,21 +13,20 @@ homepage = "https://github.com/bearcove/weavy"
 [workspace.dependencies]
 blake3 = { version = "1", default-features = false }
 copypatch = { path = "copypatch", version = "0.2.0-rc.4" }
-facet = { git = "https://github.com/facet-rs/facet", rev = "5705fa6c51289bea49f5729c52dc5e23cedce4f8" }
-facet-core = { git = "https://github.com/facet-rs/facet", rev = "5705fa6c51289bea49f5729c52dc5e23cedce4f8" }
+facet = { git = "https://github.com/facet-rs/facet", rev = "098cd67310a62a8c78f378695587f8d6a6b644d4" }
+facet-core = { git = "https://github.com/facet-rs/facet", rev = "098cd67310a62a8c78f378695587f8d6a6b644d4" }
+facet-value = { git = "https://github.com/facet-rs/facet", rev = "098cd67310a62a8c78f378695587f8d6a6b644d4" }
 object = "0.39"
-phon-schema = { git = "https://github.com/bearcove/phon", rev = "02e67bf5f89f826a127bfeb3f51e6a18ac177a6b" }
-phon-storage = { git = "https://github.com/bearcove/phon", rev = "02e67bf5f89f826a127bfeb3f51e6a18ac177a6b" }
+phon-schema = { git = "https://github.com/bearcove/phon", rev = "edef71c8e2292cdf791f796b101d764ec66fd869" }
+phon-storage = { git = "https://github.com/bearcove/phon", rev = "edef71c8e2292cdf791f796b101d764ec66fd869" }
 weavy = { path = "weavy", version = "0.2.2" }
 
 [patch."https://github.com/bearcove/weavy"]
 copypatch = { path = "copypatch" }
-taxon = { git = "https://github.com/bearcove/taxon", rev = "c0369bcfceb8e85ccc433bb6478161cd8124c7e3" }
 weavy = { path = "weavy" }
 
 [patch.crates-io]
 copypatch = { path = "copypatch" }
-taxon = { git = "https://github.com/bearcove/taxon", rev = "c0369bcfceb8e85ccc433bb6478161cd8124c7e3" }
 weavy = { path = "weavy" }
 
 

@@ -15,7 +15,7 @@ blake3.workspace = true
 weavy.workspace = true
 phon-schema.workspace = true
 phon-storage.workspace = true
-facet-value = { git = "https://github.com/facet-rs/facet", rev = "5705fa6c51289bea49f5729c52dc5e23cedce4f8" }
+facet-value.workspace = true
 
 [dev-dependencies]
 blake3.workspace = true
