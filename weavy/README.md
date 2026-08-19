@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/weavy.svg)](https://crates.io/crates/weavy)
 [![documentation](https://docs.rs/weavy/badge.svg)](https://docs.rs/weavy)
-[![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/weavy.svg)](https://github.com/facet-rs/facet/blob/main/LICENSE-MIT)
+[![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/weavy.svg)](https://github.com/bearcove/weavy/blob/main/LICENSE-MIT)
 
 weavy is the shared substrate for *lowered programs* — the common carrier that sits
 between a front-end language and the backends that run it. It stays deliberately
@@ -85,7 +85,7 @@ indices once before hot interpreter paths run.
 
 Licensed under either of:
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/facet-rs/facet/blob/main/LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](https://github.com/facet-rs/facet/blob/main/LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+- Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/bearcove/weavy/blob/main/LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](https://github.com/bearcove/weavy/blob/main/LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
