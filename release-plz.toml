@@ -1,0 +1,4 @@
+# release-plz configuration
+# https://release-plz.ieni.dev/docs/config
+#
+# One repo, one release cadence: copypatch and weavy release together.
