@@ -15,9 +15,7 @@ links = "weavy"
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-blake3.workspace = true
 copypatch = { workspace = true, optional = true }
-phon-schema.workspace = true
 
 [build-dependencies]
 copypatch = { workspace = true, features = ["build"], optional = true }
