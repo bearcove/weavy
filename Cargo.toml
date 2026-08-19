@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["copypatch", "weavy", "weavy-phon"]
+members = ["copypatch", "weavy"]
 exclude = ["fable"]
 
 [workspace.package]
@@ -11,14 +11,8 @@ repository = "https://github.com/bearcove/weavy"
 homepage = "https://github.com/bearcove/weavy"
 
 [workspace.dependencies]
-blake3 = { version = "1", default-features = false }
 copypatch = { path = "copypatch", version = "0.2.0-rc.4" }
-facet = { git = "https://github.com/facet-rs/facet", rev = "098cd67310a62a8c78f378695587f8d6a6b644d4" }
-facet-core = { git = "https://github.com/facet-rs/facet", rev = "098cd67310a62a8c78f378695587f8d6a6b644d4" }
-facet-value = { git = "https://github.com/facet-rs/facet", rev = "098cd67310a62a8c78f378695587f8d6a6b644d4" }
 object = "0.39"
-phon-schema = { git = "https://github.com/bearcove/phon", rev = "edef71c8e2292cdf791f796b101d764ec66fd869" }
-phon-storage = { git = "https://github.com/bearcove/phon", rev = "edef71c8e2292cdf791f796b101d764ec66fd869" }
 weavy = { path = "weavy", version = "0.2.2" }
 
 [patch."https://github.com/bearcove/weavy"]
@@ -39,5 +33,3 @@ disallowed_methods = "deny"
 [profile.dev.package.weavy]
 opt-level = 2
 
-[profile.dev.package.blake3]
-opt-level = 3

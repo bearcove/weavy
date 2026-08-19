@@ -10,7 +10,6 @@ pub mod r#async;
 pub mod exec;
 pub mod ir;
 pub mod mem;
-pub mod module;
 pub mod ordered;
 pub mod task;
 pub mod verified;
@@ -19,10 +18,6 @@ pub use exec::{
     CompareSide, DriveTable, EntryWriteKind, ExecTask, ExecTaskState, Executable, FallbackReason,
     FaultSite, LaneFacts, LaneKind, LaneRequest, PublishedDescriptor, StoreHandle,
     StructuralResult, TaskFault,
-};
-pub use module::{
-    CanonicalNameError, FeatureId, FeatureNamespace, PolicyDescriptor, PolicyHistoryError,
-    PolicyKey, PolicyRequirement, PolicyVersion,
 };
 pub use task::StructuralFieldSource;
 pub use verified::{
