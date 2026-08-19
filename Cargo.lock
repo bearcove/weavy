@@ -16,7 +16,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "copypatch"
-version = "0.2.0-rc.4"
+version = "0.2.0-rc.5"
 dependencies = [
  "libc",
  "object",
@@ -159,7 +159,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "weavy"
-version = "0.2.2"
+version = "0.2.3-rc.0"
 dependencies = [
  "copypatch",
  "tokio",
