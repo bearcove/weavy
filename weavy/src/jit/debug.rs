@@ -35,52 +35,11 @@
 #![allow(dead_code)]
 
 use std::io::Write;
-use std::sync::Mutex;
 
-// ---------------------------------------------------------------------------
-// GDB JIT interface types
-// ---------------------------------------------------------------------------
-
-const JIT_NOACTION: u32 = 0;
-const JIT_REGISTER_FN: u32 = 1;
-const JIT_UNREGISTER_FN: u32 = 2;
-
-#[repr(C)]
-struct JitCodeEntry {
-    next: *mut JitCodeEntry,
-    prev: *mut JitCodeEntry,
-    symfile_addr: *const u8,
-    symfile_size: u64,
-}
-
-#[repr(C)]
-struct JitDescriptor {
-    version: u32,
-    action_flag: u32,
-    relevant_entry: *mut JitCodeEntry,
-    first_entry: *mut JitCodeEntry,
-}
-
-// SAFETY: The linked list is protected by DESCRIPTOR_LOCK.
-unsafe impl Send for JitDescriptor {}
-unsafe impl Sync for JitDescriptor {}
-
-#[unsafe(no_mangle)]
-static mut __jit_debug_descriptor: JitDescriptor = JitDescriptor {
-    version: 1,
-    action_flag: JIT_NOACTION,
-    relevant_entry: std::ptr::null_mut(),
-    first_entry: std::ptr::null_mut(),
-};
-
-#[unsafe(no_mangle)]
-#[inline(never)]
-extern "C" fn __jit_debug_register_code() {
-    // GDB sets a breakpoint here. The body must not be optimized away.
-    unsafe { std::ptr::read_volatile(&0u8) };
-}
-
-static DESCRIPTOR_LOCK: Mutex<()> = Mutex::new(());
+// The GDB JIT interface itself (`__jit_debug_descriptor`, `__jit_debug_register_code` and the
+// lock around them) lives in the `gdb-jit` crate, so that weavy and any other JIT in the same
+// process (vix-codegen, ...) share one definition instead of failing to link with
+// `duplicate symbol`. This module only builds the object files it registers.
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -127,37 +86,13 @@ pub(crate) fn rust_v0_mangle(segments: &[&str]) -> String {
 
 /// Owns the GDB JIT registration. Unregisters on drop.
 pub struct JitRegistration {
-    entry: *mut JitCodeEntry,
-    _elf: Vec<u8>,
+    inner: gdb_jit::Registration,
 }
 
-// SAFETY: The JitCodeEntry is heap-allocated and only accessed under DESCRIPTOR_LOCK.
-unsafe impl Send for JitRegistration {}
-unsafe impl Sync for JitRegistration {}
-
-impl Drop for JitRegistration {
-    fn drop(&mut self) {
-        let _lock = DESCRIPTOR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            let entry = &mut *self.entry;
-
-            // Unlink from the doubly-linked list.
-            if !entry.prev.is_null() {
-                (*entry.prev).next = entry.next;
-            } else {
-                __jit_debug_descriptor.first_entry = entry.next;
-            }
-            if !entry.next.is_null() {
-                (*entry.next).prev = entry.prev;
-            }
-
-            __jit_debug_descriptor.action_flag = JIT_UNREGISTER_FN;
-            __jit_debug_descriptor.relevant_entry = self.entry;
-            __jit_debug_register_code();
-
-            // Free the entry.
-            drop(Box::from_raw(self.entry));
-        }
+impl JitRegistration {
+    /// The in-memory ELF the debugger was given.
+    pub fn elf(&self) -> &[u8] {
+        self.inner.object()
     }
 }
 
@@ -188,30 +123,11 @@ pub fn register_jit_code_with_dwarf(
     let elf = build_elf(buf_base as u64, buf_len, symbols, dwarf);
     maybe_dump_jit_elf(&elf, symbols);
 
-    let entry = Box::into_raw(Box::new(JitCodeEntry {
-        next: std::ptr::null_mut(),
-        prev: std::ptr::null_mut(),
-        symfile_addr: elf.as_ptr(),
-        symfile_size: elf.len() as u64,
-    }));
-
-    let _lock = DESCRIPTOR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    unsafe {
-        // Prepend to linked list.
-        let old_first = __jit_debug_descriptor.first_entry;
-        (*entry).next = old_first;
-        if !old_first.is_null() {
-            (*old_first).prev = entry;
-        }
-        __jit_debug_descriptor.first_entry = entry;
-        __jit_debug_descriptor.action_flag = JIT_REGISTER_FN;
-        __jit_debug_descriptor.relevant_entry = entry;
-        __jit_debug_register_code();
-    }
+    let inner = gdb_jit::register(elf);
 
     write_perf_map(buf_base, symbols);
 
-    JitRegistration { entry, _elf: elf }
+    JitRegistration { inner }
 }
 
 // ---------------------------------------------------------------------------
@@ -922,16 +838,10 @@ mod tests {
             .expect("register with unsorted symbols");
 
         // The registration is linked into the GDB JIT descriptor while alive...
-        unsafe {
-            let first = __jit_debug_descriptor.first_entry;
-            assert!(!first.is_null());
-            assert_eq!((*first).symfile_size as usize, reg._elf.len());
-        }
+        assert!(reg.inner.is_registered());
+        assert_eq!(&reg.elf()[..4], b"\x7fELF");
+        // ...and unlinked once dropped (the gdb-jit crate's own tests check the list).
         drop(reg);
-        // ...and unlinked once dropped (nextest = one process per test, no cross-talk).
-        unsafe {
-            assert!(__jit_debug_descriptor.first_entry.is_null());
-        }
     }
 
     #[test]

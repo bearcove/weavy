@@ -12,6 +12,7 @@ homepage = "https://github.com/bearcove/weavy"
 
 [workspace.dependencies]
 copypatch = { path = "copypatch", version = "0.2.0-rc.5" }
+gdb-jit = "0.1.0"
 object = "0.39"
 weavy = { path = "weavy", version = "0.2.3-rc.0" }
 
